@@ -101,6 +101,17 @@ node tools/build-windows.js   # 生成 dist/ROMKit-Windows-便携版.zip + ROMKi
 
 `.gitignore` 已经排除 `dist/`、`data/` 下的真实数据与 `.workbuddy/`，直接 clone 即可开工。
 
+**换行符已用 `.gitattributes` 固定**，clone 到任何系统都不会出问题：
+
+| 文件类型 | 换行符 | 原因 |
+|---------|-------|------|
+| `fnos/cmd/*`、`fnos/wizard/*`、`fnos/config/*` | LF | 要在飞牛 NAS（Linux）上直接执行，CRLF 会导致脚本无法运行 |
+| `start.bat` | CRLF | Windows 双击执行 |
+| 其余源码 | LF | 跨平台一致 |
+| `*.png`、`*.fpk`、`*.exe` 等 | 二进制 | 不做任何转换 |
+
+如果你在 Windows 上开发，**不要手动改这些换行符**，让 git 处理即可。
+
 建议的开发流程：
 
 ```bash

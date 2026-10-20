@@ -1,0 +1,25 @@
+# 默认按文本处理，仓库内统一存 LF
+* text=auto eol=lf
+
+# fnOS 的 cmd / wizard / config 脚本要在 Linux 上直接执行，必须保持 LF
+fnos/cmd/* text eol=lf
+fnos/wizard/* text eol=lf
+fnos/config/* text eol=lf
+fnos/app/ui/config text eol=lf
+*.sh text eol=lf
+
+# start.bat 在 Windows 上双击运行，保持 CRLF
+start.bat text eol=crlf
+
+# 二进制文件不做任何转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.gif binary
+*.bmp binary
+*.ico binary
+*.exe binary
+*.fpk binary
+*.zip binary
+*.xz binary
