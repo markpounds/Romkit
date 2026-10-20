@@ -64,10 +64,12 @@ function main() {
   fs.mkdirSync(STAGE, { recursive: true });
 
   // 1) 拷源码
+  // 注意：data/ 下的真实配置/DAT 清单绝不能进包，靠白名单而不是黑名单来保证
   const filter = {
     dir: (n) => SKIP_DIRS.has(n),
     file: (n) => SKIP_FILES.has(n) || n.endsWith('.log'),
   };
+  // data 不在这里拷贝，见第 2 步
   for (const d of ['lib', 'web', 'fnos', 'tools', 'tests', 'docs']) {
     const src = path.join(ROOT, d);
     if (fs.existsSync(src)) copyDir(src, path.join(STAGE, d), filter);
@@ -78,10 +80,23 @@ function main() {
   }
 
   // 2) 脱敏示例配置
+  // data/ 整体不从源目录拷贝，只重建空骨架 —— 真实 config.json 里有本地盘路径，
+  // DAT 清单和CRC 缓存也不该外泄
   const dataDir = path.join(STAGE, 'data');
   fs.mkdirSync(dataDir, { recursive: true });
-  fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify(sampleConfig(), null, 2), 'utf8');
+  fs.writeFileSync(path.join(dataDir, 'config.example.json'), JSON.stringify(sampleConfig(), null, 2), 'utf8');
   for (const d of ['covers', 'icons', 'dats', 'cache', 'logs']) fs.mkdirSync(path.join(dataDir, d), { recursive: true });
+
+  // 兜底自检：包里绝不能出现真实配置或DAT
+  for (const f of ['config.json', 'crc-cache.json']) {
+    if (fs.existsSync(path.join(STAGE, 'data', f))) {
+      throw new Error(`打包中止：data/${f} 是个人数据，不应出现在交接包中`);
+    }
+  }
+  const strayDats = fs.readdirSync(path.join(STAGE, 'data', 'dats'));
+  if (strayDats.length) {
+    throw new Error(`打包中止：data/dats/ 非空（${strayDats.length} 个文件），可能含个人 DAT 清单`);
+  }
 
   // 3) .gitignore
   fs.writeFileSync(path.join(STAGE, '.gitignore'), [
