@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "libraries": [],
+  "settings": {
+    "datDir": "",
+    "coverDir": "",
+    "dataDir": "",
+    "downloadCovers": false,
+    "coverSource": "remote"
+  },
+  "categories": [],
+  "_说明": "这是脱敏示例配置，请改成你自己的路径。首次启动后程序会自动补齐字段。"
+}

@@ -1,0 +1,4 @@
+#!/bin/bash
+# 升级前：数据保存在 TRIM_PKGVAR，升级不触及
+
+exit 0

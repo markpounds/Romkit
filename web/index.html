@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ROMKit · 模拟器游戏库整理</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='22' fill='%232f6feb'/><path d='M28 34h44v10H28zm0 22h44v10H28z' fill='white'/></svg>">
+</head>
+<body>
+<div id="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="logo"></div>
+      <div>
+        <div class="brand-name">ROMKit</div>
+        <div class="brand-sub">OfflineList 兼容</div>
+      </div>
+    </div>
+
+    <div class="cat-bar">
+      <div class="menu-wrap cat-switch">
+        <button class="btn cat-chip" id="catChip" title="快速切换分类">全部 ▾</button>
+        <div class="menu" id="catMenu"></div>
+      </div>
+      <button class="btn icon" id="btnCatManage" title="管理分类（新建 / 重命名 / 排序 / 删除）">⚙</button>
+      <div class="menu-wrap">
+        <button class="btn" id="btnBulk" title="对当前分组批量操作">批量 ▾</button>
+        <div class="menu" id="bulkMenu">
+          <button data-bulk="update">更新 DAT</button>
+          <button data-bulk="scan">扫描清单</button>
+          <button data-bulk="organize">整理清单</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="lib-search">
+      <input class="input" id="libSearch" placeholder="搜索清单…" autocomplete="off">
+    </div>
+
+    <div class="lib-list" id="libList">
+      <div class="empty-hint">还没有 DAT<br><span>拖入 CHS_*.zip 即可开始</span></div>
+    </div>
+
+    <div class="sidebar-actions">
+      <button class="btn btn-block" id="btnAddDat">＋ 添加 DAT</button>
+    </div>
+
+    <div class="inbox-box">
+      <div class="inbox-row">
+        <button class="btn primary" id="btnClassify" title="用所有清单逐一匹配并归位">自动归类</button>
+        <button class="btn icon" id="btnInboxBrowse" title="配置待分类文件夹">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+        </button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="main" id="main">
+    <div class="dropzone" id="dropzone">
+      <div class="dz-inner">
+        <div class="dz-icon">⬇</div>
+        <div class="dz-title">把 OfflineList 的 DAT 拖到这里</div>
+        <div class="dz-sub">支持 .zip（内含 DAT xml）或 .xml，可一次拖入多个</div>
+      </div>
+    </div>
+
+    <header class="topbar">
+      <div class="title-block">
+        <h1 id="libTitle">选择左侧的游戏清单</h1>
+        <div class="meta" id="libMeta"></div>
+      </div>
+      <div class="actions">
+        <button class="btn pending-badge" id="pendingBadge" hidden title="只看待整理项"></button>
+        <button class="btn" id="btnScan" title="扫描 ROM 目录并与 DAT 比对">扫描</button>
+        <button class="btn primary" id="btnOrganize" title="按当前设置整理文件">整理</button>
+        <button class="btn ghost" id="btnUpdate" title="检查并下载 DAT 更新">更新 DAT</button>
+        <button class="btn icon" id="btnLibSettings" title="清单设置">⚙</button>
+        <button class="btn icon" id="btnTheme" title="切换深色"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></button>
+      </div>
+    </header>
+
+    <div class="statsbar" id="statsBar"></div>
+
+    <div class="filters">
+      <div class="seg" id="filterStatus">
+        <button data-v="all" class="on">全部</button>
+        <button data-v="owned">已有</button>
+        <button data-v="missing">缺失</button>
+        <button data-v="duplicate">重复</button>
+      </div>
+      <div class="search">
+        <input id="searchInput" type="search" placeholder="搜索标题 / 英文名 / 发行商 / CRC">
+      </div>
+      <div class="filter-right">
+        <label class="chk"><input type="checkbox" id="chkOnlyProblems"> 只看有问题</label>
+        <span class="count" id="rowCount"></span>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table id="gameTable">
+        <thead>
+          <tr>
+            <th class="c-num">编号</th>
+            <th class="c-flag">地区</th>
+            <th class="c-title">游戏标题</th>
+            <th class="c-tags">语言</th>
+            <th class="c-size">大小</th>
+            <th class="c-crc">CRC</th>
+          </tr>
+        </thead>
+        <tbody id="gameBody"></tbody>
+      </table>
+      <div class="table-empty" id="tableEmpty">
+        <div>先选择一个清单，然后点击「扫描」</div>
+        <div class="sub">扫描会把 ROM 目录里的文件与 DAT 里的 CRC 逐一比对</div>
+      </div>
+    </div>
+    <footer class="statusbar">
+      <span id="statusText">就绪</span>
+      <span class="spacer"></span>
+      <span id="taskText"></span>
+    </footer>
+    <div class="task-strip" id="taskStrip" hidden></div>
+  </main>
+
+  <div class="scrim" id="scrim"></div>
+
+  <!-- 设置抽屉 -->
+  <aside class="drawer" id="drawer">
+    <div class="drawer-head">
+      <h2>清单设置</h2>
+      <button class="btn icon" id="btnCloseDrawer">✕</button>
+    </div>
+    <div class="drawer-body" id="drawerBody"></div>
+    <div class="drawer-foot">
+      <button class="btn danger ghost" id="btnDeleteLib">删除此清单</button>
+      <span class="spacer"></span>
+      <button class="btn" id="btnCancelSettings">取消</button>
+      <button class="btn primary" id="btnSaveSettings">保存</button>
+    </div>
+  </aside>
+
+  <!-- 目录选择 -->
+  <div class="modal" id="fsModal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h3 id="fsTitle">选择目录</h3>
+        <button class="btn icon" id="fsClose">✕</button>
+      </div>
+      <div class="fs-path" id="fsPath"></div>
+      <div class="fs-hint" id="fsHint" hidden></div>
+      <div class="fs-list" id="fsList"></div>
+      <div class="modal-foot">
+        <div class="fs-shortcuts" id="fsShortcuts"></div>
+        <span class="spacer"></span>
+        <button class="btn ghost" id="fsCancel">取消</button>
+        <button class="btn primary" id="fsPick">选择此目录</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 分类管理 -->
+  <div class="modal" id="catModal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h3>管理分类</h3>
+        <button class="btn icon" id="catClose">✕</button>
+      </div>
+      <div class="cat-help">
+        ↑ ↓ 调整顺序；✎ 重命名；＋ 新建子分类；✕ 删除（其中清单会移到上一级）。
+        选中分类后，顶部「批量 ▾」只处理该分类下的清单。
+      </div>
+      <div class="cat-tree" id="catTree"></div>
+      <div class="modal-foot">
+        <button class="btn ghost" id="btnCatAddRoot">＋ 新建顶层分类</button>
+        <span class="spacer"></span>
+        <button class="btn primary" id="catOk">完成</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 读取失败诊断 -->
+  <div class="modal" id="diagModal">
+    <div class="modal-box wide">
+      <div class="modal-head">
+        <h3 id="diagTitle">无法读取的文件</h3>
+        <button class="btn icon" id="diagClose">✕</button>
+      </div>
+      <div class="diag-body">
+        <div class="diag-help" id="diagHelp"></div>
+        <div class="fs-list" id="diagList"></div>
+      </div>
+      <div class="modal-foot">
+        <span class="spacer"></span>
+        <button class="btn ghost" id="diagFix">尝试修复权限</button>
+        <button class="btn primary" id="diagOk">知道了</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 整理预览 -->
+  <div class="modal" id="planModal">
+    <div class="modal-box wide">
+      <div class="modal-head">
+        <h3>整理预览</h3>
+        <button class="btn icon" id="planClose">✕</button>
+      </div>
+      <div class="plan-summary" id="planSummary"></div>
+      <div class="plan-table-wrap">
+        <table class="plan-table">
+          <thead><tr><th>动作</th><th>游戏</th><th>来源</th><th>输出文件</th><th class="num">大小</th></tr></thead>
+          <tbody id="planBody"></tbody>
+        </table>
+      </div>
+      <div class="modal-foot">
+        <span class="hint" id="planHint"></span>
+        <span class="spacer"></span>
+        <button class="btn ghost" id="planCancel">取消</button>
+        <button class="btn primary" id="planRun">开始整理</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 通用输入 -->
+  <div class="modal" id="promptModal">
+    <div class="modal-box narrow">
+      <div class="modal-head"><h3 id="promptTitle"></h3><button class="btn icon" id="promptClose">✕</button></div>
+      <div class="modal-body">
+        <p class="hint" id="promptHint"></p>
+        <input class="input" id="promptInput" />
+      </div>
+      <div class="modal-foot">
+        <span class="spacer"></span>
+        <button class="btn ghost" id="promptCancel">取消</button>
+        <button class="btn primary" id="promptOk">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 图片地址测试 -->
+  <div class="modal" id="probeModal">
+    <div class="modal-box narrow">
+      <div class="modal-head">
+        <h3>图片地址测试</h3>
+        <button class="btn icon" id="probeClose">✕</button>
+      </div>
+      <div class="modal-body" id="probeBody"></div>
+      <div class="modal-foot">
+        <span class="hint">只测试第一个游戏，用来确认源站的命名规则</span>
+        <span class="spacer"></span>
+        <button class="btn" id="probeOk">知道了</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 游戏详情（常驻右侧） -->
+  <aside class="detail-pane" id="detailDrawer">
+    <div class="drawer-head">
+      <h2 id="detailTitle">游戏详情</h2>
+    </div>
+    <div class="drawer-body" id="detailBody">
+      <div class="detail-empty">点击左侧列表中的任意游戏<br><span>这里会显示截图和详细信息</span></div>
+    </div>
+  </aside>
+
+  <!-- 封面查看 / 上传 -->
+  <div class="modal" id="coverModal">
+    <div class="modal-box cover-box">
+      <div class="modal-head">
+        <h3 id="coverTitle">游戏截图</h3>
+        <button class="btn icon" id="coverClose">✕</button>
+      </div>
+      <div class="cover-stage" id="coverStage">
+        <img id="coverImg" alt="">
+        <div class="cover-empty" id="coverEmpty">暂无截图<br><span>点击下方按钮上传，或在设置里指定图片目录</span></div>
+      </div>
+      <div class="modal-foot">
+        <span class="hint" id="coverHint"></span>
+        <span class="spacer"></span>
+        <button class="btn danger ghost" id="coverDelete">移除截图</button>
+        <button class="btn primary" id="coverUpload">上传 / 替换</button>
+      </div>
+    </div>
+  </div>
+
+  <input type="file" id="filePicker" accept=".zip,.xml" multiple hidden>
+  <input type="file" id="coverFilePicker" accept="image/*" hidden>
+  <input type="file" id="iconFilePicker" accept="image/*" hidden>
+  <input type="file" id="catIconPicker" accept="image/*" hidden>
+
+  <div class="toasts" id="toasts"></div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

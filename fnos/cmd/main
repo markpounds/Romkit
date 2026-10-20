@@ -1,0 +1,154 @@
+#!/bin/bash
+# ROMKit fnOS 原生应用生命周期脚本
+# 契约：start 成功 exit 0 / 失败 1；stop exit 0；status 运行 0 / 未运行 3
+# 说明：fnpack 在 Windows 上打包不保留可执行位，因此把 node 二进制复制到
+#       TRIM_PKGVAR（应用可写）后 chmod +x 再执行；按 CPU 架构自动选择。
+
+APP_BIN_DIR="${TRIM_APPDEST}/bin"
+VAR_DIR="${TRIM_PKGVAR}"
+PID_FILE="${VAR_DIR}/app.pid"
+LOG_FILE="${VAR_DIR}/romkit.log"
+NODE_CACHE="${VAR_DIR}/bin/node"
+PORT="${TRIM_SERVICE_PORT:-8765}"
+
+log_msg() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "${LOG_FILE}"
+}
+
+# 按架构选择内置 node 二进制源
+select_node_src() {
+    local arch
+    arch="$(uname -m)"
+    case "${arch}" in
+        x86_64|amd64)  echo "${APP_BIN_DIR}/node-x64" ;;
+        aarch64|arm64) echo "${APP_BIN_DIR}/node-arm64" ;;
+        *) return 1 ;;
+    esac
+}
+
+# 把 node 二进制就位到可写目录并加可执行位（幂等，升级后自动刷新）
+prepare_node() {
+    local src="$1"
+    [ -f "${src}" ] || { echo "未找到 node 二进制：${src}" > "${TRIM_TEMP_LOGFILE}"; return 1; }
+    mkdir -p "${VAR_DIR}/bin"
+    if [ ! -x "${NODE_CACHE}" ] || [ "$(stat -c%s "${src}" 2>/dev/null)" != "$(stat -c%s "${NODE_CACHE}" 2>/dev/null)" ]; then
+        cp -f "${src}" "${NODE_CACHE}" || { echo "复制 node 二进制失败" > "${TRIM_TEMP_LOGFILE}"; return 1; }
+        chmod +x "${NODE_CACHE}" || { echo "设置 node 可执行权限失败" > "${TRIM_TEMP_LOGFILE}"; return 1; }
+    fi
+    return 0
+}
+
+check_process() {
+    local pid="$1"
+    kill -0 "${pid}" 2>/dev/null
+}
+
+status() {
+    if [ -f "${PID_FILE}" ]; then
+        local pid
+        pid="$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')"
+        if [ -n "${pid}" ] && check_process "${pid}"; then
+            return 0
+        fi
+        rm -f "${PID_FILE}"
+    fi
+    return 1
+}
+
+wait_port() {
+    # 用 bash /dev/tcp 探测端口就绪（不依赖 curl）
+    local i
+    for ((i = 0; i < 60; i++)); do
+        if (echo > "/dev/tcp/127.0.0.1/${PORT}") > /dev/null 2>&1; then
+            return 0
+        fi
+        if ! status; then
+            return 1  # 进程已退出
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
+start_process() {
+    if status; then
+        return 0
+    fi
+
+    local node_src
+    node_src="$(select_node_src)" || {
+        echo "不支持的 CPU 架构：$(uname -m)" > "${TRIM_TEMP_LOGFILE}"
+        return 1
+    }
+    prepare_node "${node_src}" || return 1
+
+    mkdir -p "${VAR_DIR}"
+    log_msg "启动 ROMKit（端口 ${PORT}，数据目录 ${VAR_DIR}）"
+
+    cd "${TRIM_APPDEST}" || { echo "无法进入应用目录" > "${TRIM_TEMP_LOGFILE}"; return 1; }
+    # 安装向导里填的存储位置（环境变量名不带 TRIM_ 前缀）；留空则用默认值
+    ROMKIT_HOST=0.0.0.0 \
+    ROMKIT_PORT="${PORT}" \
+    ROMKIT_DATA="${romkit_data_dir:-${VAR_DIR}}" \
+    ROMKIT_DAT_DIR="${romkit_dat_dir:-}" \
+    ROMKIT_COVER_DIR="${romkit_cover_dir:-}" \
+        "${NODE_CACHE}" server.js >> "${LOG_FILE}" 2>&1 &
+    local pid=$!
+    printf "%s" "${pid}" > "${PID_FILE}"
+
+    if wait_port; then
+        log_msg "ROMKit 启动成功（pid=${pid}）"
+        return 0
+    fi
+
+    log_msg "ROMKit 启动失败，终止 pid=${pid}"
+    kill -TERM "${pid}" 2>/dev/null
+    sleep 1
+    kill -KILL "${pid}" 2>/dev/null
+    rm -f "${PID_FILE}"
+    echo "ROMKit 服务启动失败，请查看 ${LOG_FILE}" > "${TRIM_TEMP_LOGFILE}"
+    return 1
+}
+
+stop_process() {
+    log_msg "停止 ROMKit"
+    if [ -r "${PID_FILE}" ]; then
+        local pid
+        pid="$(head -n 1 "${PID_FILE}" | tr -d '[:space:]')"
+        if [ -n "${pid}" ] && check_process "${pid}"; then
+            kill -TERM "${pid}" 2>/dev/null
+            local count=0
+            while check_process "${pid}" && [ ${count} -lt 10 ]; do
+                sleep 1
+                count=$((count + 1))
+            done
+            if check_process "${pid}"; then
+                kill -KILL "${pid}" 2>/dev/null
+                sleep 1
+            fi
+            log_msg "ROMKit 已停止（pid=${pid}）"
+        fi
+        rm -f "${PID_FILE}"
+    fi
+    return 0
+}
+
+case "$1" in
+start)
+    start_process
+    ;;
+stop)
+    stop_process
+    ;;
+status)
+    if status; then
+        exit 0
+    else
+        exit 3
+    fi
+    ;;
+*)
+    echo "未知命令：$1" > "${TRIM_TEMP_LOGFILE}"
+    exit 1
+    ;;
+esac

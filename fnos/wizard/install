@@ -1,0 +1,31 @@
+[
+  {
+    "stepTitle": "存储位置（可全部留空）",
+    "items": [
+      {
+        "type": "text",
+        "field": "romkit_dat_dir",
+        "label": "DAT 保存位置（填了还要在应用设置的授权目录里加一次）",
+        "rules": [],
+        "options": [],
+        "initValue": ""
+      },
+      {
+        "type": "text",
+        "field": "romkit_cover_dir",
+        "label": "图片保存位置（填了还要在应用设置的授权目录里加一次）",
+        "rules": [],
+        "options": [],
+        "initValue": ""
+      },
+      {
+        "type": "text",
+        "field": "romkit_data_dir",
+        "label": "数据保存位置（清单/设置/缓存；改这个会换数据目录）",
+        "rules": [],
+        "options": [],
+        "initValue": ""
+      }
+    ]
+  }
+]

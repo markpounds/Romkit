@@ -1,0 +1,7 @@
+#!/bin/bash
+# 配置变更后：授权目录变更后重启服务使其生效（仅当正在运行时）
+if "${TRIM_APPDEST}/cmd/main" status; then
+    "${TRIM_APPDEST}/cmd/main" stop
+    "${TRIM_APPDEST}/cmd/main" start
+fi
+exit 0

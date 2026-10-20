@@ -1,0 +1,24 @@
+# 构建产物（体积大，可由 tools/ 重新生成）
+dist/
+fnos/deps/
+node_modules/
+*.fpk
+*.exe
+*.zip
+
+# 运行时数据（含本地磁盘路径与 DAT 清单，不要提交）
+data/config.json
+data/dats/
+data/covers/
+data/icons/
+data/cache/
+data/logs/
+data/*.log
+data/crc-cache.json
+data/.port
+
+# 会话记忆与临时文件
+.workbuddy/
+*.tmp
+.DS_Store
+Thumbs.db
