@@ -1307,7 +1307,7 @@ async function saveGlobalPath(key, p) {
 async function classifyAll() {
   const inbox = (S.ui && S.ui.inboxDir || '').trim();
   if (!inbox) { toast('先点左侧的文件夹图标，设置「待分类文件夹」', 'warn'); return; }
-  if (!confirm(`将扫描「${inbox}」里的文件，与所有清单逐一比对。\n\n命中的文件会按各清单的设置送到对应输出目录并改名；未命中的留在原处。\n\n继续？`)) return;
+  if (!confirm(`将扫描「${inbox}」里的文件，与清单逐一比对。\n\n已集齐的清单会被自动跳过（它们不可能再有新文件待归类），只比对还有缺失的清单。\n\n命中的文件会按各清单的设置送到对应输出目录并改名；未命中的留在原处。\n\n继续？`)) return;
   try {
     const { task } = await api('/classify', { method: 'POST', body: {} });
     setStatus('正在自动归类…', true);
@@ -1316,6 +1316,7 @@ async function classifyAll() {
     const r = t2.result || {};
     const parts = [`${r.moved || 0} 个文件已归位`];
     if (r.failed) parts.push(`${r.failed} 个失败`);
+    if (r.skippedComplete) parts.push(`跳过 ${r.skippedComplete} 个已集齐的清单`);
     toast(esc('归类完成：' + parts.join('，')), r.failed ? 'warn' : 'ok', 7000);
     if (r.errors && r.errors.length) { console.warn('归类失败', r.errors); toast(esc('失败原因：' + r.errors[0].error || r.errors[0].title), 'err', 9000); }
     setStatus('');
@@ -1482,6 +1483,50 @@ function showPlan(plan) {
   };
 }
 
+/* 清除当前清单的缓存：CRC 缓存 + 扫描结果。匹配结果不对时用它强制重算。 */
+async function clearLibCache() {
+  const lib = S.libs.find((l) => l.id === S.currentId);
+  if (!lib) return;
+  if (!confirm(`清除「${lib.name}」的缓存？\n\n会清掉这个清单的 CRC 校验缓存和扫描结果，下次扫描将重新读取文件（大库会比较慢），不改动任何 ROM 文件。`)) return;
+  try {
+    setStatus('正在清除缓存…');
+    const r = await api(`/libraries/${lib.id}/cache`, { method: 'DELETE' });
+    S.pending = new Set();
+    S.pendingInfo = null;
+    S.games = [];
+    renderPendingBadge();
+    await loadState();
+    renderHeader(S.libs.find((l) => l.id === S.currentId));
+    renderTable(true);
+    setStatus('就绪');
+    toast(esc(r.message || '缓存已清除'), 'ok', 5000);
+  } catch (e) {
+    setStatus('就绪');
+    toast(esc('清除失败：' + e.message), 'err');
+  }
+}
+
+/* 清除全部清单的缓存（设置页里用，用于「匹配错了死活不再匹配」的兜底） */
+async function clearAllCache() {
+  if (!confirm('清除全部缓存？\n\n会清掉所有清单的 CRC 校验缓存与扫描结果，之后每个清单都需要重新扫描（大库会比较慢）。不改动任何 ROM 文件。')) return;
+  try {
+    const r = await api('/cache/clear', { method: 'POST' });
+    S.pending = new Set();
+    S.pendingInfo = null;
+    S.games = [];
+    S.stats = null;
+    renderPendingBadge();
+    await loadState();
+    if (S.currentId) {
+      renderHeader(S.libs.find((l) => l.id === S.currentId));
+      renderTable(true);
+    }
+    toast(esc(r.message || '全部缓存已清除'), 'ok', 6000);
+  } catch (e) {
+    toast(esc('清除失败：' + e.message), 'err');
+  }
+}
+
 async function doUpdate() {
   const lib = S.libs.find((l) => l.id === S.currentId);
   if (!lib) return;
@@ -1615,7 +1660,12 @@ function onTask(t) {
 
   if (t.status === 'error') {
     if (isCurrent) setStatus('出错了');
-    toast(`任务失败（${esc(libNameOf(t.libraryId))}）：` + esc(t.error), 'err', 6000);
+    // 权限类错误常常是多行的（会列出所有不可写的目录），换行要保留、
+    // 停留时间也要长一些，否则用户还没来得及看就消失了
+    const raw = String(t.error || '未知错误');
+    const isPerm = /EACCES|EPERM|没有写权限|不可写/.test(raw);
+    const html = esc(raw).replace(/\n/g, '<br>');
+    toast(`任务失败（${esc(libNameOf(t.libraryId))}）：${html}`, 'err', isPerm ? 15000 : 6000);
     return;
   }
   if (t.status === 'cancelled') {
@@ -1663,11 +1713,25 @@ function onTask(t) {
     if (r.skipped) parts.push(`跳过 ${r.skipped}`);
     if (r.failed) parts.push(`失败 ${r.failed}`);
     toast(esc('整理完成：' + parts.join('，')), r.failed ? 'warn' : 'ok', 5500);
+    if (r.blockedDirs && r.blockedDirs.length) {
+      // 目录没写权限时不要只给一句 EACCES，明确告诉用户是哪个目录、怎么授权
+      toast(
+        `有目录没有写权限，本次跳过了 ${r.permissionBlocked || 0} 条：<br><span class="mono" style="font-size:10.5px">${r.blockedDirs.slice(0, 3).map(esc).join('<br>')}</span>` +
+        '<br><span style="font-size:11px">请在飞牛「应用设置 → 目录访问权限」里授予读写权限后重新整理</span>',
+        'warn', 15000,
+      );
+    }
     if (r.errors && r.errors.length) {
       console.warn('整理错误', r.errors);
       toast(esc('首个错误：' + r.errors[0].error), 'err', 6000);
     }
     // 服务端已按执行结果增量更新状态，这里只刷新列表，无需整库重扫
+    // 待整理统计也随结果一起回来了，直接套用，避免高亮和数量停留在整理前
+    if (r.pending && typeof r.pending.pending === 'number') {
+      S.pending = new Set(r.pending.indexes || []);
+      S.pendingInfo = { total: r.pending.total || 0, pending: r.pending.pending };
+      renderPendingBadge();
+    }
     if (t.libraryId === S.currentId) {
       setTimeout(() => {
         if (S.currentId === t.libraryId) loadState().then(() => loadGames());
@@ -2448,6 +2512,8 @@ function bind() {
   $('#btnScan').onclick = doScan;
   $('#btnOrganize').onclick = doOrganize;
   $('#btnUpdate').onclick = doUpdate;
+  $('#btnClearCache').onclick = clearLibCache;
+  $('#btnClearAllCache').onclick = clearAllCache;
   // 批量操作在左侧（只对当前选中的分组生效）
   $('#btnBulk').onclick = (e) => {
     e.stopPropagation();

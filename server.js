@@ -27,7 +27,7 @@ const WEB_DIR = path.join(__dirname, 'web');
 const WEB_EMBED = (typeof globalThis !== 'undefined' && globalThis.__ROMKIT_WEB__) || null;
 /** 监听地址：默认仅本机（安全）；NAS 等场景可用 ROMKIT_HOST=0.0.0.0 开放局域网 */
 const HOST = process.env.ROMKIT_HOST || '127.0.0.1';
-const VERSION = '2.15.4';
+const VERSION = '2.15.8';
 // 进程 umask：飞牛/NAS 等服务环境下可能默认 077，会让 ROMKit 整理出来的
 // 文件（0600）和目录（0700）对同机其他用户（含 SMB 共享）完全不可读，
 // 表现为「整理完就打不开 / 扫描时报权限不足」。这里统一放宽到 022。
@@ -102,6 +102,27 @@ async function computePending(lib, scan, dat) {
   } catch (_) {
     return { ...EMPTY_PENDING };
   }
+}
+
+/**
+ * 取某个清单最近一次扫描的统计（games / owned），用于「是否已集齐」这类快速判断。
+ * 优先内存，其次磁盘快照；都没有就返回 0，让调用方按「未知」处理。
+ * 注意：这里刻意不加载 DAT —— 判断集齐不该付出解析整个 DAT 的代价。
+ */
+async function scanStatsOf(lib) {
+  const rt = runtime.get(lib.id);
+  if (rt && rt.scan && rt.scan.stats) return rt.scan.stats;
+  try {
+    const raw = await fsp.readFile(path.join(store.DATA_DIR, 'cache', lib.id + '.json'), 'utf8');
+    const scan = JSON.parse(raw);
+    if (scan && scan.stats) {
+      // 顺手放进运行时，后面真正要建计划时省一次读盘
+      const cur = runtime.get(lib.id);
+      if (cur && !cur.scan) cur.scan = scan;
+      return scan.stats;
+    }
+  } catch (_) {}
+  return { games: 0, owned: 0 };
 }
 
 function taskSnapshot(t) {
@@ -603,18 +624,35 @@ async function handleApi(req, res, url) {
 
     const task = createTask('classify', null, async ({ setProgress, isCancelled }) => {
       const libs = store.listLibraries();
+
+      // 先筛掉「已经全部拥有」的清单：它们不可能再收待分类文件夹里的新文件，
+      // 却要为此把整个待分类夹遍历一遍并建计划（大库很贵）。
+      // 拿不到扫描结果时按「未集齐」处理，宁可多跑也不漏。
+      setProgress({ phase: 'classify', message: '正在筛选待匹配的清单…', current: 0, total: libs.length });
+      const targets = [];
+      let skippedComplete = 0;
+      let skippedNoOut = 0;
+      for (const lib of libs) {
+        if (!lib.settings || !lib.settings.outDir) { skippedNoOut++; continue; }
+        const stats = await scanStatsOf(lib);
+        const games = stats.games || 0;
+        const owned = stats.owned || 0;
+        if (games > 0 && owned >= games) { skippedComplete++; continue; }
+        targets.push(lib);
+      }
+
       let moved = 0;
       let failed = 0;
       const errors = [];
       const report = [];
-      for (let i = 0; i < libs.length; i++) {
+      for (let i = 0; i < targets.length; i++) {
         if (isCancelled()) break;
-        const lib = libs[i];
+        const lib = targets[i];
         setProgress({
           phase: 'classify',
-          message: `正在比对「${lib.name}」…`,
+          message: `正在比对「${lib.name}」…（已跳过 ${skippedComplete} 个已集齐的清单）`,
           current: i + 1,
-          total: libs.length,
+          total: targets.length,
         });
         const rt = await hydrateLibrary(lib);
         if (!rt.dat || !lib.settings.outDir) continue;
@@ -642,7 +680,15 @@ async function handleApi(req, res, url) {
         } catch (_) {}
       }
       await store.saveCrcCache().catch(() => {});
-      return { moved, failed, errors: errors.slice(0, 50), report };
+      return {
+        moved,
+        failed,
+        errors: errors.slice(0, 50),
+        report,
+        checked: targets.length,
+        skippedComplete,
+        skippedNoOut,
+      };
     });
     return json(res, 200, { task: taskSnapshot(task) });
   }
@@ -894,6 +940,35 @@ async function handleApi(req, res, url) {
       return json(res, 200, { task: taskSnapshot(task) });
     }
 
+    // ---------- 清除本清单的缓存（CRC + 扫描快照）
+    // 场景：文件内容变了但大小/mtime 恰好没变，或想强制重新匹配一遍
+    if (action === '/cache' && method === 'DELETE') {
+      const romDir = lib.settings && lib.settings.romDir;
+      const crcRemoved = store.cacheClearUnder(romDir);
+      await store.saveCrcCache().catch(() => {});
+      // 扫描快照（含匹配结果）也要一起清掉，否则下次打开还是旧的匹配
+      const cacheFile = path.join(store.DATA_DIR, 'cache', lib.id + '.json');
+      let scanRemoved = false;
+      try {
+        await fsp.rm(cacheFile, { force: true });
+        scanRemoved = true;
+      } catch (_) {}
+      const rt = runtime.get(lib.id);
+      if (rt) {
+        rt.scan = null;
+        rt.pending = null;
+      }
+      lib.lastScan = null;
+      await store.save().catch(() => {});
+      return json(res, 200, {
+        ok: true,
+        crcRemoved,
+        scanRemoved,
+        romDir: romDir || '',
+        message: `已清除 ${crcRemoved} 条 CRC 缓存与扫描结果，下次扫描会重新计算`,
+      });
+    }
+
     // ---------- 整理计划
     if (action === '/plan' && method === 'POST') {
       const rt = await hydrateLibrary(lib);
@@ -978,6 +1053,7 @@ async function handleApi(req, res, url) {
       const dryRun = !!body.dryRun;
       const task = createTask('organize', lib.id, async ({ setProgress, isCancelled }) => {
         const result = await executePlan(lib, plan, { onProgress: setProgress, isCancelled, dryRun });
+        let pendingInfo = rt.pending || { ...EMPTY_PENDING };
         if (!dryRun) {
           applyOrganizeToScan(rt.scan, result, lib.settings.romDir);
           lib.lastOrganize = new Date().toISOString();
@@ -985,6 +1061,9 @@ async function handleApi(req, res, url) {
           // 整理出的文件回填 CRC 缓存，之后重扫不再整库重读
           await warmCrcCache(plan).catch(() => {});
           await store.saveCrcCache().catch(() => {});
+          // 整理完立刻重算「待整理」，否则界面要等下一次扫描才更新高亮和数量
+          pendingInfo = await computePending(lib, rt.scan, rt.dat).catch(() => ({ ...EMPTY_PENDING }));
+          rt.pending = pendingInfo;
           // 同步更新扫描缓存，重启后不用重扫
           await fsp.writeFile(path.join(store.DATA_DIR, 'cache', lib.id + '.json'), JSON.stringify(rt.scan)).catch(() => {});
         }
@@ -992,6 +1071,11 @@ async function handleApi(req, res, url) {
           done: result.done, skipped: result.skipped, failed: result.failed, planned: result.planned,
           moved: result.moved, prunedDirs: result.prunedDirs || 0, byAction: result.byAction,
           errors: result.errors.slice(0, 50),
+          pending: pendingInfo,
+          // 输出目录以外不可写的目录（例如备份目录只给了读权限），
+          // 这些目录相关的条目本次被跳过，需要用户去授权后重试
+          blockedDirs: result.blockedDirs || [],
+          permissionBlocked: result.permissionBlocked || 0,
         };
       });
       return json(res, 200, { task: taskSnapshot(task) });
@@ -1170,6 +1254,37 @@ async function handleApi(req, res, url) {
     }
     await store.save();
     return json(res, 200, { ok: true });
+  }
+
+  // ---------- 清除全部缓存（所有清单的 CRC 缓存 + 扫描快照）
+  if (p === '/cache/clear' && method === 'POST') {
+    const crcRemoved = store.cacheClearAll();
+    await store.saveCrcCache().catch(() => {});
+    let scansRemoved = 0;
+    const cacheDir = path.join(store.DATA_DIR, 'cache');
+    try {
+      const files = await fsp.readdir(cacheDir);
+      for (const f of files) {
+        if (!f.endsWith('.json')) continue;
+        await fsp.rm(path.join(cacheDir, f), { force: true }).catch(() => {});
+        scansRemoved++;
+      }
+    } catch (_) {}
+    // 内存里的运行时状态也一并失效，避免界面还显示旧的匹配结果
+    for (const [id, rt] of runtime) {
+      rt.scan = null;
+      rt.pending = null;
+      const lib = store.getLibrary(id);
+      if (lib) lib.lastScan = null;
+      covers.invalidate(id);
+    }
+    await store.save().catch(() => {});
+    return json(res, 200, {
+      ok: true,
+      crcRemoved,
+      scansRemoved,
+      message: `已清除全部缓存：${crcRemoved} 条 CRC、${scansRemoved} 份扫描结果`,
+    });
   }
 
   // ---------- 组内清单排序：{ categoryId, ids: [...] }（只允许该分类的直属清单）

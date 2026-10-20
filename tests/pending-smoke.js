@@ -18,7 +18,14 @@ function ok(cond, name) {
   else { failed++; console.log('  ✗ ' + name); }
 }
 
-// CRC 12345678 对应内容：随便造一个文件，用文件名匹配即可（matchMode=both）
+// 两个 ROM 的内容固定，CRC 由内容算出后写进 DAT。
+// 注意：扫描以 CRC 为权威依据，不能用伪造的 CRC 指望文件名兜底。
+const { crc32, toHex } = require('../lib/crc32');
+const BUF_A = Buffer.from('a'.repeat(128));
+const BUF_B = Buffer.from('b'.repeat(128));
+const CRC_A = toHex(crc32(BUF_A));
+const CRC_B = toHex(crc32(BUF_B));
+
 const DAT_XML = `<?xml version="1.0"?>
 <dat>
   <configuration>
@@ -31,7 +38,7 @@ const DAT_XML = `<?xml version="1.0"?>
       <imageNumber>1</imageNumber><title>游戏甲</title><saveType></saveType>
       <romSize>1024</romSize><publisher>Tester</publisher><location>7</location><sourceRom>官中</sourceRom>
       <language>4</language>
-      <files><romCRC extension=".gg">12345678</romCRC></files>
+      <files><romCRC extension=".gg">${CRC_A}</romCRC></files>
       <im1CRC>AAAA1111</im1CRC><im2CRC>BBBB2222</im2CRC>
       <comment>Game A</comment><duplicateID>1</duplicateID>
     </game>
@@ -39,7 +46,7 @@ const DAT_XML = `<?xml version="1.0"?>
       <imageNumber>2</imageNumber><title>游戏乙</title><saveType></saveType>
       <romSize>1024</romSize><publisher>Tester</publisher><location>7</location><sourceRom>官中</sourceRom>
       <language>4</language>
-      <files><romCRC extension=".gg">87654321</romCRC></files>
+      <files><romCRC extension=".gg">${CRC_B}</romCRC></files>
       <im1CRC>CCCC1111</im1CRC><im2CRC>DDDD2222</im2CRC>
       <comment>Game B</comment><duplicateID>2</duplicateID>
     </game>
@@ -73,8 +80,8 @@ async function main() {
     await fsp.mkdir(d, { recursive: true });
   }
   // 两个名字能对上标题的 ROM
-  await fsp.writeFile(path.join(ROMS, '游戏甲.gg'), 'a'.repeat(128));
-  await fsp.writeFile(path.join(ROMS, '游戏乙.gg'), 'b'.repeat(128));
+  await fsp.writeFile(path.join(ROMS, '游戏甲.gg'), BUF_A);
+  await fsp.writeFile(path.join(ROMS, '游戏乙.gg'), BUF_B);
 
   const srv = spawn(process.execPath, [path.join(ROOT, 'server.js')], {
     env: { ...process.env, ROMKIT_DATA: DATA, ROMKIT_PORT: String(PORT) },

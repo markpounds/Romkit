@@ -48,7 +48,7 @@
 
     <div class="inbox-box">
       <div class="inbox-row">
-        <button class="btn primary" id="btnClassify" title="用所有清单逐一匹配并归位">自动归类</button>
+        <button class="btn primary" id="btnClassify" title="扫描待分类文件夹，只与还没集齐的清单比对并归位（已集齐的清单自动跳过）">自动归类</button>
         <button class="btn icon" id="btnInboxBrowse" title="配置待分类文件夹">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
         </button>
@@ -75,6 +75,7 @@
         <button class="btn" id="btnScan" title="扫描 ROM 目录并与 DAT 比对">扫描</button>
         <button class="btn primary" id="btnOrganize" title="按当前设置整理文件">整理</button>
         <button class="btn ghost" id="btnUpdate" title="检查并下载 DAT 更新">更新 DAT</button>
+        <button class="btn ghost" id="btnClearCache" title="清除当前清单的 CRC 与扫描缓存，下次扫描会重新计算（匹配结果不对时用它）">清缓存</button>
         <button class="btn icon" id="btnLibSettings" title="清单设置">⚙</button>
         <button class="btn icon" id="btnTheme" title="切换深色"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></button>
       </div>
@@ -136,6 +137,7 @@
     <div class="drawer-body" id="drawerBody"></div>
     <div class="drawer-foot">
       <button class="btn danger ghost" id="btnDeleteLib">删除此清单</button>
+      <button class="btn ghost" id="btnClearAllCache" title="清除所有清单的 CRC 与扫描缓存，各清单下次扫描会重新计算">清全部缓存</button>
       <span class="spacer"></span>
       <button class="btn" id="btnCancelSettings">取消</button>
       <button class="btn primary" id="btnSaveSettings">保存</button>

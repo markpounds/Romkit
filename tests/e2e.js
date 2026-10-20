@@ -83,7 +83,7 @@ async function main() {
     const buf = crypto.randomBytes(256 * 1024 + i * 1024);
     const p = i === 2 ? path.join(sub, 'hidden-game.gg') : path.join(romDir, `game${i}.gg`);
     await fsp.writeFile(p, buf);
-    roms.push({ path: p, crc: crc32hex(buf) });
+    roms.push({ path: p, crc: crc32hex(buf), buf });
   }
   // 读取真实 GG DAT（直接从原始 zip 里取 xml，保留完整结构）
   const { loadDatFile } = require('../lib/dat');
@@ -175,15 +175,43 @@ async function main() {
   ok('3 个游戏全部命中', t1.result.stats.owned === 3, JSON.stringify(t1.result.stats));
   ok('子目录中的文件被找到', true);
 
-  console.log('\n[5] 文件名匹配回退');
-  // 把其中一个 ROM 移走，换一个文件名匹配但 CRC 不符的文件
+  console.log('\n[5] 不同 CRC 视为不同文件');
+  // 把其中一个 ROM 换掉：文件名完全一致，但内容不同 → CRC 不同。
+  // 这种「同名但内容不同」的改版必须判为未拥有，不能靠文件名硬套。
   await fsp.rm(roms[1].path);
   const renamed = path.join(romDir, 'Shining Force Gaiden (简).gg');
   await fsp.writeFile(renamed, crypto.randomBytes(300 * 1024));
   const s2 = await api(`/libraries/${libId}/scan`, { method: 'POST', body: '{}', headers: { 'Content-Type': 'application/json' } });
   const t2 = await waitTask(s2.task.id);
   const g2 = (await api(`/libraries/${libId}/games`)).games.find((g) => g.title.includes('光明力量'));
-  ok('CRC 失败后用文件名兜底', g2.status === 'owned' && g2.matches[0].via === 'name', JSON.stringify({ status: g2.status, matches: g2.matches }));
+  ok('同名但 CRC 不同 → 不匹配', g2.status === 'missing' && g2.matches.length === 0,
+    JSON.stringify({ status: g2.status, matches: g2.matches }));
+
+  // 切到「纯文件名」模式后，同一个文件应能被认出来（保留手动兜底的开关）
+  await api(`/libraries/${libId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ settings: { matchMode: 'name' } }),
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const s2b = await api(`/libraries/${libId}/scan`, { method: 'POST', body: '{}', headers: { 'Content-Type': 'application/json' } });
+  await waitTask(s2b.task.id);
+  const g2b = (await api(`/libraries/${libId}/games`)).games.find((g) => g.title.includes('光明力量'));
+  ok('切成纯文件名模式后可以匹配上', g2b.status === 'owned' && g2b.matches[0].via === 'name',
+    JSON.stringify({ status: g2b.status, matches: g2b.matches }));
+
+  // 还原：恢复 both 模式与原始 ROM，后续整理用例仍按 3 个游戏走
+  await api(`/libraries/${libId}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ settings: { matchMode: 'both' } }),
+    headers: { 'Content-Type': 'application/json' },
+  });
+  await fsp.rm(renamed, { force: true });
+  await fsp.writeFile(roms[1].path, roms[1].buf); // 用原始字节还原
+  {
+    const s3 = await api(`/libraries/${libId}/scan`, { method: 'POST', body: '{}', headers: { 'Content-Type': 'application/json' } });
+    const t3 = await waitTask(s3.task.id);
+    ok('还原后重新扫描 3 个全部命中', t3.result.stats.owned === 3, JSON.stringify(t3.result.stats));
+  }
 
   console.log('\n[6] 整理（保留压缩包）');
   const plan = await api(`/libraries/${libId}/plan`, { method: 'POST', body: '{}', headers: { 'Content-Type': 'application/json' } });
