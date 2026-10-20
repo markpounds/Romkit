@@ -72,7 +72,7 @@ function main() {
     const src = path.join(ROOT, d);
     if (fs.existsSync(src)) copyDir(src, path.join(STAGE, d), filter);
   }
-  for (const f of ['server.js', 'README.md', 'start.bat']) {
+  for (const f of ['server.js', 'README.md', 'HANDOVER.md', 'start.bat', '.gitignore', '.gitattributes']) {
     const src = path.join(ROOT, f);
     if (fs.existsSync(src)) fs.copyFileSync(src, path.join(STAGE, f));
   }
