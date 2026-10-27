@@ -345,7 +345,9 @@ async function main() {
   ok('文件夹名去掉 disc', !/disc/i.test(path.basename([...dirsX][0])), path.basename([...dirsX][0]));
   const namesX = pX.items.map((i) => path.basename(i.dest));
   ok('文件名带各自盘号', namesX.some((n) => /Disc 1/.test(n)) && namesX.some((n) => /Disc 2/.test(n)), namesX.join(' , '));
-  ok('两盘各自用自己的编号', namesX.some((n) => n.startsWith('0001 - ')) && namesX.some((n) => n.startsWith('0002 - ')), namesX.join(' , '));
+  // DAT 惯例：同一游戏的多盘共用同一个 imageNumber，所以两盘编号相同，
+  // 靠标题里的 Disc 1 / Disc 2 区分（%u 与列表显示保持一致）
+  ok('两盘共用同样的编号（与列表一致）', namesX.every((n) => n.startsWith('0001 - ')), namesX.join(' , '));
 
   // 真实执行一遍：目标子文件夹必须被自动创建（曾因未 mkdir 导致 ENOENT）
   fs.writeFileSync(path.join(romDir, 'Shenmue II (Disc 1).chd'), Buffer.alloc(128, 5));
@@ -429,9 +431,9 @@ async function main() {
   ok('收进同一个文件夹', texDirs.size === 1, [...texDirs].join(' | '));
   const texFolder = [...texDirs][0];
   ok('文件夹名不带「纹理包」', !/纹理包/.test(path.basename(texFolder)), path.basename(texFolder));
-  ok('文件夹用主文件的命名', path.basename(texFolder).startsWith('0001 - '), path.basename(texFolder));
+  ok('文件夹用主文件的命名（按 imageNumber）', path.basename(texFolder).startsWith('0010 - '), path.basename(texFolder));
   const texNames = pTex.items.map((i) => path.basename(i.dest));
-  ok('纹理包文件保留自己的编号 0002', texNames.some((n) => n.startsWith('0002 - ')), texNames.join(' , '));
+  ok('纹理包文件用自己的 imageNumber 0020', texNames.some((n) => n.startsWith('0020 - ')), texNames.join(' , '));
   ok('纹理包文件保留标记', texNames.some((n) => /纹理包/.test(n)), texNames.join(' , '));
   ok('主文件不带标记', texNames.some((n) => !/纹理包/.test(n)), texNames.join(' , '));
   ok('统计纹理包分组', pTex.textureGroups === 1, String(pTex.textureGroups));
@@ -474,7 +476,7 @@ async function main() {
   const biosFolder = [...biosDirs][0];
   ok('文件夹名不带「Bios」', !/bios/i.test(path.basename(biosFolder)), path.basename(biosFolder));
   const biosNames = pBios.items.map((i) => path.basename(i.dest));
-  ok('BIOS 文件用自己的编号 0002', biosNames.some((n) => n.startsWith('0002 - ')), biosNames.join(' , '));
+  ok('BIOS 文件用自己的 imageNumber 0031', biosNames.some((n) => n.startsWith('0031 - ')), biosNames.join(' , '));
   ok('BIOS 文件保留标记', biosNames.some((n) => /Bios/i.test(n)), biosNames.join(' , '));
   ok('统计 BIOS 分组', pBios.biosGroups === 1, String(pBios.biosGroups));
 
