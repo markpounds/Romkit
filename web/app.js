@@ -17,7 +17,6 @@ const S = {
   coverGame: null,
   filter: 'all',
   search: '',
-  onlyProblems: false,
   sort: { key: 'index', dir: 1 },
   rendered: 0,
   draft: null,
@@ -936,7 +935,6 @@ function applyFilter() {
     if (S.filter === 'missing' && g.status !== 'missing') return false;
     if (S.filter === 'duplicate' && g.status !== 'duplicate') return false;
     if (S.filter === 'pending' && !(S.pending && S.pending.has(g.index))) return false;
-    if (S.onlyProblems && g.status !== 'missing' && g.status !== 'duplicate') return false;
     if (!q) return true;
     const hay = [
       g.title, g.comment, g.publisher, g.sourceRom,
@@ -970,9 +968,6 @@ function renderTable(reset = false) {
   body.appendChild(frag);
   S.rendered += slice.length;
 
-  $('#rowCount').textContent = total === S.games.length
-    ? `${fmtNum(total)} 项`
-    : `${fmtNum(total)} / ${fmtNum(S.games.length)} 项`;
 
   const empty = $('#tableEmpty');
   if (S.games.length && !total) {
@@ -2684,7 +2679,6 @@ function bind() {
     clearTimeout(tmr);
     tmr = setTimeout(applyFilter, 120);
   };
-  $('#chkOnlyProblems').onchange = (e) => { S.onlyProblems = e.target.checked; applyFilter(); };
 
   const wrap = $('.table-wrap');
   wrap.addEventListener('scroll', () => {

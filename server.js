@@ -27,7 +27,7 @@ const WEB_DIR = path.join(__dirname, 'web');
 const WEB_EMBED = (typeof globalThis !== 'undefined' && globalThis.__ROMKIT_WEB__) || null;
 /** 监听地址：默认仅本机（安全）；NAS 等场景可用 ROMKIT_HOST=0.0.0.0 开放局域网 */
 const HOST = process.env.ROMKIT_HOST || '127.0.0.1';
-const VERSION = '2.15.14';
+const VERSION = '2.15.15';
 // 进程 umask：飞牛/NAS 等服务环境下可能默认 077，会让 ROMKit 整理出来的
 // 文件（0600）和目录（0700）对同机其他用户（含 SMB 共享）完全不可读，
 // 表现为「整理完就打不开 / 扫描时报权限不足」。这里统一放宽到 022。
@@ -237,6 +237,8 @@ function summarize(lib) {
     romTitle: lib.romTitle || '',
     newDat: (lib.datConfig && lib.datConfig.newDat) || null,
     addedAt: lib.addedAt,
+    // DAT 的更新时间：重新导入/在线更新时刷新；老配置没这字段就用导入时间兜底
+    updatedAt: lib.updatedAt || lib.addedAt || null,
     settings: lib.settings,
     assets: lib.assets,
     error: lib.error || null,
@@ -380,6 +382,7 @@ async function registerDat({ buffer, fileName, sourceLabel, origin }) {
     romTitle: dat.romTitle,
     datConfig: { newDat: dat.newDat, romTitle: dat.romTitle },
     addedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
     origin: { type: origin.type, label: sourceLabel, at: new Date().toISOString() },
     settings: { ...store.DEFAULT_SETTINGS },
     assets: JSON.parse(JSON.stringify(store.DEFAULT_ASSETS)),
@@ -1137,7 +1140,8 @@ async function handleApi(req, res, url) {
         lib.extensions = resu.dat.extensions;
         lib.datConfig = { newDat: resu.dat.newDat, romTitle: resu.dat.romTitle };
         lib.error = null;
-        lib.updatedAt = new Date().toISOString();
+        // 内容没变不算更新，保留原来的时间
+        if (!unchanged) lib.updatedAt = new Date().toISOString();
         runtime.set(lib.id, {
           dat: resu.dat,
           // 内容没变就沿用原来的扫描结果，界面上的拥有数/待整理都不动
