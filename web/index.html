@@ -71,11 +71,7 @@
         <div class="meta" id="libMeta"></div>
       </div>
       <div class="actions">
-        <button class="btn pending-badge" id="pendingBadge" hidden title="只看待整理项"></button>
-        <button class="btn" id="btnScan" title="扫描 ROM 目录并与 DAT 比对">扫描</button>
-        <button class="btn primary" id="btnOrganize" title="按当前设置整理文件">整理</button>
-        <button class="btn ghost" id="btnUpdate" title="检查并下载 DAT 更新">更新 DAT</button>
-        <button class="btn ghost" id="btnClearCache" title="清除当前清单的 CRC 与扫描缓存，下次扫描会重新计算（匹配结果不对时用它）">清缓存</button>
+        <!-- 扫描/整理/更新 DAT/清缓存 已并入下方统计栏的四个统计格 -->
         <button class="btn icon" id="btnLibSettings" title="清单设置">⚙</button>
         <button class="btn icon" id="btnTheme" title="切换深色"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></button>
       </div>
@@ -94,6 +90,7 @@
         <input id="searchInput" type="search" placeholder="搜索标题 / 英文名 / 发行商 / CRC">
       </div>
       <div class="filter-right">
+        <label class="chk"><input type="checkbox" id="chkOnlyPending"> 只看待整理</label>
         <label class="chk"><input type="checkbox" id="chkOnlyProblems"> 只看有问题</label>
         <span class="count" id="rowCount"></span>
       </div>

@@ -772,8 +772,11 @@ function renderHeader(lib) {
   if (lib.settings.outDir) bits.push(`<span title="${esc(lib.settings.outDir)}"><b>输出</b> ${esc(shortPath(lib.settings.outDir))}</span>`);
   if (lib.error) bits.push(`<span style="color:var(--bad)">${esc(lib.error)}</span>`);
   $('#libMeta').innerHTML = bits.join('');
-  $('#btnScan').disabled = !lib.settings.romDir;
-  $('#btnOrganize').disabled = !lib.settings.outDir;
+  // 这两个按钮已并入统计栏，可能不存在
+  const bs = $('#btnScan');
+  if (bs) bs.disabled = !lib.settings.romDir;
+  const bo = $('#btnOrganize');
+  if (bo) bo.disabled = !lib.settings.outDir;
 }
 
 /* 平台简称：DAT 的 system 字段常是厂商全称（如 "Nintendo - Nintendo Entertainment System"），
@@ -877,22 +880,36 @@ function renderStats() {
   const missing = st.missing != null ? st.missing : total - owned;
   const dup = st.duplicates || 0;
   const pct = total ? Math.round((owned / total) * 100) : 0;
-  // 待整理跟着清单走，放在统计栏里比只在右上角按钮上更醒目
+  // 待整理跟着清单走
   const pend = S.pendingInfo ? (S.pendingInfo.pending || 0) : 0;
-  const pendCell = `<div class="stat warn clickable${S.pendingOnly ? ' on' : ''}" id="statPending" title="${pend ? '点击只看待整理项' : '没有待整理项'}">
-      <div class="v">${fmtNum(pend)}</div><div class="k">待整理</div>
-    </div>`;
+  const noRom = !(lib && lib.settings && lib.settings.romDir);
+  // 四个统计格兼作操作入口（扫描 / 整理 / 更新 DAT / 清缓存），
+  // 顶部那排按钮已经去掉，只留设置与主题
   $('#statsBar').innerHTML = `
     <div class="stat accent"><div class="v">${pct}%</div><div class="k">收集进度</div></div>
     <div class="stat"><div class="v">${fmtNum(total)}</div><div class="k">清单总数</div></div>
-    <div class="stat ok"><div class="v">${fmtNum(owned)}</div><div class="k">已拥有</div></div>
-    <div class="stat bad"><div class="v">${fmtNum(missing)}</div><div class="k">缺失</div></div>
-    <div class="stat warn"><div class="v">${fmtNum(dup)}</div><div class="k">多份副本</div></div>
-    ${pendCell}
+    <div class="stat ok act" id="statScan" title="${noRom ? '尚未指定 ROM 目录，点击去设置' : '点击扫描 ROM 目录并与 DAT 比对'}">
+      <div class="v">${fmtNum(owned)}</div><div class="k">已拥有</div>
+    </div>
+    <div class="stat bad act" id="statOrganize" title="点击按当前设置整理文件">
+      <div class="v">${fmtNum(missing)}</div><div class="k">缺失</div>
+    </div>
+    <div class="stat warn act" id="statUpdateDat" title="点击检查并下载 DAT 更新">
+      <div class="v">${fmtNum(dup)}</div><div class="k">多份副本</div>
+    </div>
+    <div class="stat warn act" id="statClearCache" title="点击清除本清单的 CRC 与扫描缓存">
+      <div class="v">${fmtNum(pend)}</div><div class="k">待整理</div>
+    </div>
     <div class="stat"><div class="v" style="font-size:12px;font-weight:500;padding-top:4px">${st.scannedAt ? timeAgo(st.scannedAt) : '未扫描'}</div><div class="k">上次扫描</div></div>
   `;
-  const cell = document.getElementById('statPending');
-  if (cell) cell.onclick = () => togglePendingOnly();
+  const bind = (id, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.onclick = fn;
+  };
+  bind('statScan', doScan);
+  bind('statOrganize', doOrganize);
+  bind('statUpdateDat', doUpdate);
+  bind('statClearCache', clearLibCache);
 }
 
 function timeAgo(iso) {
@@ -931,9 +948,9 @@ function applyFilter() {
       return ((va || 0) - (vb || 0)) * dir;
     });
   }
-  // 只看待整理项（顶栏徽标切换）
-  if (S.pendingOnly && S.pending && S.pending.size) {
-    list = list.filter((g) => S.pending.has(g.index));
+  // 只看待整理项（筛选栏勾选框）
+  if (S.pendingOnly) {
+    list = list.filter((g) => S.pending && S.pending.has(g.index));
   }
   // 有问题的排前面？不：保持 DAT 顺序更符合"清单感"
   S.filtered = list;
@@ -1609,22 +1626,23 @@ function taskLabel(kind) {
   return { scan: '扫描', organize: '整理', update: '更新 DAT', covers: '下载截图', classify: '自动归类' }[kind] || kind;
 }
 
-/** 顶栏「待整理 N」徽标，点击只筛出待整理项 */
+/** 待整理的筛选入口已并入筛选栏的勾选框，这里只负责同步状态 */
 function renderPendingBadge() {
-  const el = $('#pendingBadge');
-  if (!el) return;
+  const cb = $('#chkOnlyPending');
+  if (!cb) return;
   const n = S.pending ? S.pending.size : 0;
-  el.hidden = !n;
-  el.textContent = n ? `待整理 ${n}` : '';
-  el.classList.toggle('on', !!S.pendingOnly);
-  el.onclick = () => togglePendingOnly();
+  cb.checked = !!S.pendingOnly;
+  // 没有待整理项时禁用，避免出现「勾了却是空列表」
+  cb.disabled = n === 0;
+  const label = cb.parentElement;
+  if (label) label.style.opacity = n === 0 ? '.45' : '1';
 }
 
-/** 「只看待整理项」开关：徽标和统计栏里的待整理格子共用 */
-function togglePendingOnly() {
-  S.pendingOnly = !S.pendingOnly;
+/** 「只看待整理项」开关：筛选栏勾选框与统计格共用 */
+function togglePendingOnly(force) {
+  const next = typeof force === 'boolean' ? force : !S.pendingOnly;
+  S.pendingOnly = next;
   renderPendingBadge();
-  renderStats();
   applyFilter();
   toast(S.pendingOnly ? '只看待整理项' : '显示全部', 'ok', 2500);
 }
@@ -2566,10 +2584,14 @@ function bind() {
   $('#btnAddDat').onclick = () => $('#filePicker').click();
   $('#filePicker').onchange = (e) => { importFiles(e.target.files); e.target.value = ''; };
 
-  $('#btnScan').onclick = doScan;
-  $('#btnOrganize').onclick = doOrganize;
-  $('#btnUpdate').onclick = doUpdate;
-  $('#btnClearCache').onclick = clearLibCache;
+  // 只有存在时才绑定（老页面结构兼容）
+  const bindIf = (sel, fn) => { const el = $(sel); if (el) el.onclick = fn; };
+  bindIf('#btnScan', doScan);
+  bindIf('#btnOrganize', doOrganize);
+  bindIf('#btnUpdate', doUpdate);
+  bindIf('#btnClearCache', clearLibCache);
+  const cp = $('#chkOnlyPending');
+  if (cp) cp.onchange = () => { S.pendingOnly = cp.checked; applyFilter(); };
   $('#btnClearAllCache').onclick = clearAllCache;
   // 批量操作在左侧（只对当前选中的分组生效）
   $('#btnBulk').onclick = (e) => {
