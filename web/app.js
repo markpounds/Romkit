@@ -32,7 +32,6 @@ const S = {
   libQuery: '', // 侧栏清单搜索
   catFolded: {},// 分类折叠状态
   dragLib: null,// 正在拖拽的 DAT id
-  pendingOnly: false,
   tasks: {},    // taskId -> 任务快照（支持多个 DAT 同时跑）
   libTask: {},  // libId -> 该 DAT 最近的任务 id
   pending: new Set(), // 待整理的游戏 index（扫描后算出）
@@ -743,7 +742,7 @@ async function loadPending() {
   if (!S.currentId) {
     S.pending = new Set();
     S.pendingInfo = null;
-    renderPendingBadge();
+    renderStats();
     return;
   }
   try {
@@ -754,7 +753,6 @@ async function loadPending() {
     S.pending = new Set();
     S.pendingInfo = null;
   }
-  renderPendingBadge();
   renderStats();
 }
 
@@ -882,35 +880,42 @@ function renderStats() {
   const pct = total ? Math.round((owned / total) * 100) : 0;
   // 待整理跟着清单走
   const pend = S.pendingInfo ? (S.pendingInfo.pending || 0) : 0;
-  const noRom = !(lib && lib.settings && lib.settings.romDir);
-  // 四个统计格兼作操作入口（扫描 / 整理 / 更新 DAT / 清缓存），
-  // 顶部那排按钮已经去掉，只留设置与主题
+  // 四个统计格就是分类页签：点一下按该类筛选，再点一下回到全部
+  const tab = (v, cls, num, label, extra = '') => `
+    <div class="stat ${cls} tab${S.filter === v ? ' on' : ''}" data-filter="${v}" title="点击筛选：${label}（再点一次显示全部）">
+      <div class="v">${num}</div><div class="k">${label}${extra}</div>
+    </div>`;
   $('#statsBar').innerHTML = `
     <div class="stat accent"><div class="v">${pct}%</div><div class="k">收集进度</div></div>
     <div class="stat"><div class="v">${fmtNum(total)}</div><div class="k">清单总数</div></div>
-    <div class="stat ok act" id="statScan" title="${noRom ? '尚未指定 ROM 目录，点击去设置' : '点击扫描 ROM 目录并与 DAT 比对'}">
-      <div class="v">${fmtNum(owned)}</div><div class="k">已拥有</div>
-    </div>
-    <div class="stat bad act" id="statOrganize" title="点击按当前设置整理文件">
-      <div class="v">${fmtNum(missing)}</div><div class="k">缺失</div>
-    </div>
-    <div class="stat warn act" id="statUpdateDat" title="点击检查并下载 DAT 更新">
-      <div class="v">${fmtNum(dup)}</div><div class="k">多份副本</div>
-    </div>
-    <div class="stat warn act" id="statClearCache" title="点击清除本清单的 CRC 与扫描缓存">
-      <div class="v">${fmtNum(pend)}</div><div class="k">待整理</div>
-    </div>
+    ${tab('owned', 'ok', fmtNum(owned), '已拥有')}
+    ${tab('missing', 'bad', fmtNum(missing), '缺失')}
+    ${tab('duplicate', 'warn', fmtNum(dup), '多份副本')}
+    ${tab('pending', 'pend', fmtNum(pend), '待整理')}
     <div class="stat"><div class="v" style="font-size:12px;font-weight:500;padding-top:4px">${st.scannedAt ? timeAgo(st.scannedAt) : '未扫描'}</div><div class="k">上次扫描</div></div>
   `;
-  const bind = (id, fn) => {
-    const el = document.getElementById(id);
-    if (el) el.onclick = fn;
-  };
-  bind('statScan', doScan);
-  bind('statOrganize', doOrganize);
-  bind('statUpdateDat', doUpdate);
-  bind('statClearCache', clearLibCache);
+  $$('#statsBar .stat.tab').forEach((el) => {
+    el.onclick = () => setFilter(el.dataset.filter);
+  });
+  syncFilterUI();
 }
+
+/** 切换分类筛选；重复点同一个页签 = 回到全部 */
+function setFilter(v) {
+  S.filter = (S.filter === v) ? 'all' : v;
+  renderStats();
+  applyFilter();
+}
+
+/** 筛选相关的小控件（显示全部按钮 / 提示文字）跟随状态 */
+function syncFilterUI() {
+  const active = S.filter !== 'all';
+  const reset = $('#btnFilterReset');
+  if (reset) reset.hidden = !active;
+  const hint = $('#filterHint');
+  if (hint) hint.hidden = active;
+}
+
 
 function timeAgo(iso) {
   const d = new Date(iso).getTime();
@@ -929,6 +934,7 @@ function applyFilter() {
     if (S.filter === 'owned' && g.status === 'missing') return false;
     if (S.filter === 'missing' && g.status !== 'missing') return false;
     if (S.filter === 'duplicate' && g.status !== 'duplicate') return false;
+    if (S.filter === 'pending' && !(S.pending && S.pending.has(g.index))) return false;
     if (S.onlyProblems && g.status !== 'missing' && g.status !== 'duplicate') return false;
     if (!q) return true;
     const hay = [
@@ -947,10 +953,6 @@ function applyFilter() {
       if (typeof va === 'string') return va.localeCompare(vb, 'zh') * dir;
       return ((va || 0) - (vb || 0)) * dir;
     });
-  }
-  // 只看待整理项（筛选栏勾选框）
-  if (S.pendingOnly) {
-    list = list.filter((g) => S.pending && S.pending.has(g.index));
   }
   // 有问题的排前面？不：保持 DAT 顺序更符合"清单感"
   S.filtered = list;
@@ -1556,7 +1558,7 @@ async function clearLibCache() {
     S.pending = new Set();
     S.pendingInfo = null;
     S.games = [];
-    renderPendingBadge();
+    renderStats();
     await loadState();
     renderHeader(S.libs.find((l) => l.id === S.currentId));
     renderTable(true);
@@ -1577,7 +1579,7 @@ async function clearAllCache() {
     S.pendingInfo = null;
     S.games = [];
     S.stats = null;
-    renderPendingBadge();
+    renderStats();
     await loadState();
     if (S.currentId) {
       renderHeader(S.libs.find((l) => l.id === S.currentId));
@@ -1626,26 +1628,6 @@ function taskLabel(kind) {
   return { scan: '扫描', organize: '整理', update: '更新 DAT', covers: '下载截图', classify: '自动归类' }[kind] || kind;
 }
 
-/** 待整理的筛选入口已并入筛选栏的勾选框，这里只负责同步状态 */
-function renderPendingBadge() {
-  const cb = $('#chkOnlyPending');
-  if (!cb) return;
-  const n = S.pending ? S.pending.size : 0;
-  cb.checked = !!S.pendingOnly;
-  // 没有待整理项时禁用，避免出现「勾了却是空列表」
-  cb.disabled = n === 0;
-  const label = cb.parentElement;
-  if (label) label.style.opacity = n === 0 ? '.45' : '1';
-}
-
-/** 「只看待整理项」开关：筛选栏勾选框与统计格共用 */
-function togglePendingOnly(force) {
-  const next = typeof force === 'boolean' ? force : !S.pendingOnly;
-  S.pendingOnly = next;
-  renderPendingBadge();
-  applyFilter();
-  toast(S.pendingOnly ? '只看待整理项' : '显示全部', 'ok', 2500);
-}
 
 /** 顶栏只反映「当前选中 DAT」的任务；没有运行中的任务时回到就绪 */
 function refreshStatus() {
@@ -1770,7 +1752,7 @@ function onTask(t) {
       S.pending = new Set();
       S.pendingInfo = { total: pend.total || 0, pending: 0 };
     }
-    renderPendingBadge();
+    renderStats();
     loadState().then(() => loadGames());
   } else if (t.kind === 'organize') {
     const r = t.result || {};
@@ -1798,7 +1780,7 @@ function onTask(t) {
     if (r.pending && typeof r.pending.pending === 'number') {
       S.pending = new Set(r.pending.indexes || []);
       S.pendingInfo = { total: r.pending.total || 0, pending: r.pending.pending };
-      renderPendingBadge();
+      renderStats();
     }
     if (t.libraryId === S.currentId) {
       setTimeout(() => {
@@ -2590,8 +2572,6 @@ function bind() {
   bindIf('#btnOrganize', doOrganize);
   bindIf('#btnUpdate', doUpdate);
   bindIf('#btnClearCache', clearLibCache);
-  const cp = $('#chkOnlyPending');
-  if (cp) cp.onchange = () => { S.pendingOnly = cp.checked; applyFilter(); };
   $('#btnClearAllCache').onclick = clearAllCache;
   // 批量操作在左侧（只对当前选中的分组生效）
   $('#btnBulk').onclick = (e) => {
@@ -2666,13 +2646,9 @@ function bind() {
   $('#btnDeleteLib').onclick = deleteLib;
   $('#scrim').onclick = () => closeDrawer();
 
-  $$('#filterStatus button').forEach((b) => {
-    b.onclick = () => {
-      S.filter = b.dataset.v;
-      $$('#filterStatus button').forEach((x) => x.classList.toggle('on', x === b));
-      applyFilter();
-    };
-  });
+  // 分类筛选已移到统计格的页签上，这里只保留「显示全部」
+  const freset = $('#btnFilterReset');
+  if (freset) freset.onclick = () => { S.filter = 'all'; renderStats(); applyFilter(); };
   let tmr;
   $('#searchInput').oninput = (e) => {
     S.search = e.target.value;

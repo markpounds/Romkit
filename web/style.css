@@ -399,21 +399,17 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .stat.bad .v { color: var(--bad); }
 .stat.warn .v { color: var(--warn); }
 .stat.accent .v { color: var(--accent); }
-/* 统计格兼作操作入口：hover 时整格提亮，右上角给一个小的"可点"提示 */
-.stat.act { cursor: pointer; position: relative; transition: background .12s; }
-.stat.act:hover { background: var(--accent-soft); }
-.stat.act:active { background: var(--bg); }
-.stat.act[data-disabled] { cursor: not-allowed; opacity: .5; }
-.stat.act[data-disabled]:hover { background: transparent; }
+/* 统计格即分类页签：点一下按该类筛选，再点回到全部 */
+.stat.tab { cursor: pointer; transition: background .12s, box-shadow .12s; }
+.stat.tab:hover { background: var(--accent-soft); }
+.stat.tab.on { background: var(--accent-soft); box-shadow: inset 0 -2px 0 var(--accent); }
+.stat.tab.on .k { color: var(--accent); font-weight: 600; }
 .stat .k { white-space: nowrap; }
-/* 悬停时右上角出现一个小点，暗示这一格能点 */
-.stat.act::after {
-  content: ''; position: absolute; top: 8px; right: 9px;
-  width: 4px; height: 4px; border-radius: 50%;
-  background: var(--accent); opacity: 0;
-  transition: opacity .12s;
-}
-.stat.act:hover::after { opacity: 1; background: var(--accent); }
+.stat.pend .v { color: var(--warn); }
+
+/* 筛选行左侧：提示文字 / 显示全部 */
+.filter-hint { font-size: 11.5px; color: var(--text-3); margin-right: 4px; }
+.filter-reset { padding: 3px 9px; font-size: 12px; }
 
 .filters {
   display: flex; align-items: center; gap: 10px;
