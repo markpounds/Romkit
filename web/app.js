@@ -880,24 +880,33 @@ function renderStats() {
   const pct = total ? Math.round((owned / total) * 100) : 0;
   // 待整理跟着清单走
   const pend = S.pendingInfo ? (S.pendingInfo.pending || 0) : 0;
-  // 四个统计格就是分类页签：点一下按该类筛选，再点一下回到全部
-  const tab = (v, cls, num, label, extra = '') => `
+  // 统计格就是分类页签：点一下按该类筛选，再点一下回到全部。
+  // 「清单总数」即「全部」。
+  const tab = (v, cls, num, label) => `
     <div class="stat ${cls} tab${S.filter === v ? ' on' : ''}" data-filter="${v}" title="${v === 'all' ? '显示全部条目' : '点击筛选：' + label + '（再点一次显示全部）'}">
-      <div class="v">${num}</div><div class="k">${label}${extra}</div>
+      <div class="v">${num}</div><div class="k">${label}</div>
     </div>`;
   $('#statsBar').innerHTML = `
-    <div class="stat accent"><div class="v">${pct}%</div><div class="k">收集进度</div></div>
-    ${tab('all', '', fmtNum(total), '清单总数', '')}
+    ${tab('all', '', fmtNum(total), '清单总数')}
     ${tab('owned', 'ok', fmtNum(owned), '已拥有')}
     ${tab('missing', 'bad', fmtNum(missing), '缺失')}
     ${tab('duplicate', 'warn', fmtNum(dup), '多份副本')}
     ${tab('pending', 'pend', fmtNum(pend), '待整理')}
-    <div class="stat"><div class="v" style="font-size:12px;font-weight:500;padding-top:4px">${st.scannedAt ? timeAgo(st.scannedAt) : '未扫描'}</div><div class="k">上次扫描</div></div>
   `;
   $$('#statsBar .stat.tab').forEach((el) => {
     el.onclick = () => setFilter(el.dataset.filter);
   });
-  syncFilterUI();
+
+  // 收集进度 / 上次扫描 / 上次整理 挪到右上角按钮下方的小字里
+  const meta = $('#actionsMeta');
+  if (meta) {
+    const items = [
+      `<span>收集进度：<b style="color:var(--warn)">${pct}%</b></span>`,
+      `<span>扫描：${st.scannedAt ? timeAgo(st.scannedAt) : '未扫描'}</span>`,
+      `<span>更新：${lib && lib.updatedAt ? timeAgo(lib.updatedAt) : '—'}</span>`,
+    ];
+    meta.innerHTML = items.join('');
+  }
 }
 
 /** 切换分类筛选；重复点同一个页签 = 回到全部 */
@@ -907,14 +916,6 @@ function setFilter(v) {
   applyFilter();
 }
 
-/** 筛选相关的小控件（显示全部按钮 / 提示文字）跟随状态 */
-function syncFilterUI() {
-  const active = S.filter !== 'all';
-  const reset = $('#btnFilterReset');
-  if (reset) reset.hidden = !active;
-  const hint = $('#filterHint');
-  if (hint) hint.hidden = active;
-}
 
 
 function timeAgo(iso) {
@@ -2677,9 +2678,6 @@ function bind() {
   $('#btnDeleteLib').onclick = deleteLib;
   $('#scrim').onclick = () => closeDrawer();
 
-  // 分类筛选已移到统计格的页签上，这里只保留「显示全部」
-  const freset = $('#btnFilterReset');
-  if (freset) freset.onclick = () => { S.filter = 'all'; renderStats(); applyFilter(); };
   let tmr;
   $('#searchInput').oninput = (e) => {
     S.search = e.target.value;

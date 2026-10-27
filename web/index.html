@@ -70,28 +70,27 @@
         <h1 id="libTitle">选择左侧的游戏清单</h1>
         <div class="meta" id="libMeta"></div>
       </div>
-      <div class="actions">
-        <button class="btn" id="btnScan" title="扫描 ROM 目录并与 DAT 比对">扫描</button>
-        <button class="btn primary" id="btnOrganize" title="按当前设置整理文件">整理</button>
-        <button class="btn ghost" id="btnUpdate" title="检查并下载 DAT 更新">更新 DAT</button>
-        <button class="btn ghost" id="btnClearCache" title="清除当前清单的 CRC 与扫描缓存，下次扫描会重新计算（匹配结果不对时用它）">清缓存</button>
-        <button class="btn icon" id="btnLibSettings" title="清单设置">⚙</button>
-        <button class="btn icon" id="btnTheme" title="切换深色"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></button>
+      <div class="actions-wrap">
+        <div class="actions">
+          <button class="btn" id="btnScan" title="扫描 ROM 目录并与 DAT 比对">扫描</button>
+          <button class="btn primary" id="btnOrganize" title="按当前设置整理文件">整理</button>
+          <button class="btn ghost" id="btnUpdate" title="检查并下载 DAT 更新">更新 DAT</button>
+          <button class="btn ghost" id="btnClearCache" title="清除当前清单的 CRC 与扫描缓存，下次扫描会重新计算（匹配结果不对时用它）">清缓存</button>
+          <button class="btn icon" id="btnLibSettings" title="清单设置">⚙</button>
+          <button class="btn icon" id="btnTheme" title="切换深色"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></button>
+        </div>
+        <div class="actions-meta" id="actionsMeta"></div>
       </div>
     </header>
 
-    <div class="statsbar" id="statsBar"></div>
-
-    <div class="filters">
-      <!-- 分类页签已并入上方统计格：点「已拥有/缺失/多份副本/待整理」即按该类筛选 -->
-      <button class="btn ghost filter-reset" id="btnFilterReset" hidden title="清除筛选">← 显示全部</button>
-      <span class="filter-hint" id="filterHint">点上方「已拥有 / 缺失 / 多份副本 / 待整理」可筛选</span>
-      <div class="search">
+    <div class="statrow">
+      <div class="statsbar" id="statsBar"></div>
+      <div class="search-panel">
         <input id="searchInput" type="search" placeholder="搜索标题 / 英文名 / 发行商 / CRC">
-      </div>
-      <div class="filter-right">
-        <label class="chk"><input type="checkbox" id="chkOnlyProblems"> 只看有问题</label>
-        <span class="count" id="rowCount"></span>
+        <div class="search-meta">
+          <label class="chk"><input type="checkbox" id="chkOnlyProblems"> 只看有问题</label>
+          <span class="count" id="rowCount"></span>
+        </div>
       </div>
     </div>
 
