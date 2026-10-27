@@ -27,7 +27,7 @@ const WEB_DIR = path.join(__dirname, 'web');
 const WEB_EMBED = (typeof globalThis !== 'undefined' && globalThis.__ROMKIT_WEB__) || null;
 /** 监听地址：默认仅本机（安全）；NAS 等场景可用 ROMKIT_HOST=0.0.0.0 开放局域网 */
 const HOST = process.env.ROMKIT_HOST || '127.0.0.1';
-const VERSION = '2.15.12';
+const VERSION = '2.15.13';
 // 进程 umask：飞牛/NAS 等服务环境下可能默认 077，会让 ROMKit 整理出来的
 // 文件（0600）和目录（0700）对同机其他用户（含 SMB 共享）完全不可读，
 // 表现为「整理完就打不开 / 扫描时报权限不足」。这里统一放宽到 022。

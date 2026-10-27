@@ -882,12 +882,12 @@ function renderStats() {
   const pend = S.pendingInfo ? (S.pendingInfo.pending || 0) : 0;
   // 四个统计格就是分类页签：点一下按该类筛选，再点一下回到全部
   const tab = (v, cls, num, label, extra = '') => `
-    <div class="stat ${cls} tab${S.filter === v ? ' on' : ''}" data-filter="${v}" title="点击筛选：${label}（再点一次显示全部）">
+    <div class="stat ${cls} tab${S.filter === v ? ' on' : ''}" data-filter="${v}" title="${v === 'all' ? '显示全部条目' : '点击筛选：' + label + '（再点一次显示全部）'}">
       <div class="v">${num}</div><div class="k">${label}${extra}</div>
     </div>`;
   $('#statsBar').innerHTML = `
     <div class="stat accent"><div class="v">${pct}%</div><div class="k">收集进度</div></div>
-    <div class="stat"><div class="v">${fmtNum(total)}</div><div class="k">清单总数</div></div>
+    ${tab('all', '', fmtNum(total), '清单总数', '')}
     ${tab('owned', 'ok', fmtNum(owned), '已拥有')}
     ${tab('missing', 'bad', fmtNum(missing), '缺失')}
     ${tab('duplicate', 'warn', fmtNum(dup), '多份副本')}
@@ -992,17 +992,48 @@ const FLAG_SVG = {
   eu: '<svg viewBox="0 0 24 16" class="flag"><rect width="24" height="16" fill="#003399"/><g fill="#ffcc00"><circle cx="12" cy="3.5" r=".9"/><circle cx="15.5" cy="5" r=".9"/><circle cx="18" cy="8" r=".9"/><circle cx="15.5" cy="11" r=".9"/><circle cx="12" cy="12.5" r=".9"/><circle cx="8.5" cy="11" r=".9"/><circle cx="6" cy="8" r=".9"/><circle cx="8.5" cy="5" r=".9"/></g></svg>',
   jp: '<svg viewBox="0 0 24 16" class="flag"><rect width="24" height="16" fill="#fff" stroke="#d8dde5" stroke-width=".6"/><circle cx="12" cy="8" r="4.6" fill="#bc002d"/></svg>',
   hk: '<svg viewBox="0 0 24 16" class="flag"><rect width="24" height="16" fill="#de2910"/><g fill="#fff"><circle cx="12" cy="8" r="1.1"/><circle cx="12" cy="4.4" r="1.25"/><circle cx="15.4" cy="6.5" r="1.25"/><circle cx="14.1" cy="10.5" r="1.25"/><circle cx="9.9" cy="10.5" r="1.25"/><circle cx="8.6" cy="6.5" r="1.25"/></g></svg>',
+  // 多地区（USA, Europe 这种并列）或认不出地区时用联合国旗，
+  // 比一个问号更能说明"这条不是单一地区版本"
+  un: '<svg viewBox="0 0 24 16" class="flag"><rect width="24" height="16" fill="#5b92e5"/><circle cx="12" cy="8" r="5.2" fill="none" stroke="#fff" stroke-width=".9"/><ellipse cx="12" cy="8" rx="2.4" ry="5.2" fill="none" stroke="#fff" stroke-width=".7"/><path d="M6.9 6.2h10.2M6.9 9.8h10.2" stroke="#fff" stroke-width=".7"/><g fill="#fff"><circle cx="12" cy="1.9" r=".5"/><circle cx="12" cy="14.1" r=".5"/><circle cx="5.4" cy="4.9" r=".5"/><circle cx="18.6" cy="4.9" r=".5"/><circle cx="4.6" cy="8" r=".5"/><circle cx="19.4" cy="8" r=".5"/><circle cx="5.4" cy="11.1" r=".5"/><circle cx="18.6" cy="11.1" r=".5"/></g></svg>',
 };
 
-/** 从标签推断国家/地区；中、美、欧、日之外的其他亚洲地区统一用香港区旗 */
+/**
+ * 从标签推断国家/地区。
+ * 注意 DAT 里 (USA, Europe) 这种是**一个**标签里并列多个地区，
+ * 必须按逗号/斜杠/& 拆开再判断，否则整串匹配不上，以前就会掉到"未知"。
+ * 多地区或认不出来时统一给联合国旗。
+ */
+const REGION_MAP = {
+  china: { key: 'cn', label: '中国' },
+  usa: { key: 'us', label: '美国' },
+  europe: { key: 'eu', label: '欧洲' },
+  japan: { key: 'jp', label: '日本' },
+  asia: { key: 'hk', label: '亚洲' },
+  'hong kong': { key: 'hk', label: '亚洲' },
+  taiwan: { key: 'hk', label: '亚洲' },
+  korea: { key: 'hk', label: '亚洲' },
+};
+
 function regionOf(g) {
-  const tags = (g.tags || []).map((x) => String(x).toLowerCase());
-  if (tags.includes('china')) return { key: 'cn', label: '中国' };
-  if (tags.includes('usa')) return { key: 'us', label: '美国' };
-  if (tags.includes('europe')) return { key: 'eu', label: '欧洲' };
-  if (tags.includes('japan')) return { key: 'jp', label: '日本' };
-  if (tags.some((x) => ['asia', 'hong kong', 'taiwan', 'korea'].includes(x))) return { key: 'hk', label: '亚洲' };
-  return { key: '', label: '未知' };
+  const raw = (g.tags || []).map((x) => String(x).toLowerCase());
+  const tokens = [];
+  for (const t of raw) {
+    for (const part of t.split(/[,/&、+]|\bund\b/)) {
+      const k = part.trim();
+      if (k) tokens.push(k);
+    }
+  }
+  const hits = [];
+  for (const t of tokens) {
+    const hit = REGION_MAP[t];
+    if (hit && !hits.some((h) => h.key === hit.key)) hits.push(hit);
+  }
+  if (hits.length === 1) return hits[0];
+  if (hits.length > 1) {
+    // 多地区并列：用联合国旗 + 把地区名都写进 tooltip
+    return { key: 'un', label: hits.map((h) => h.label).join(' / ') };
+  }
+  return { key: 'un', label: '未知地区' };
 }
 
 /** 语言标签：CHS=简体中文（绿）、CHT=繁体中文（蓝）；CHS&CHT 这类合并写法会同时显示两个 */
@@ -1026,7 +1057,7 @@ function rowOf(g) {
 
   const statusText = { owned: '已拥有', missing: '缺失', duplicate: '多份副本', unknown: '未扫描' }[g.status] || '';
   const rc = regionOf(g);
-  const flag = FLAG_SVG[rc.key] || '<span class="flag-none" title="未知地区">?</span>';
+  const flag = FLAG_SVG[rc.key] || FLAG_SVG.un;
   const langs = langTags(g);
   const crc = (g.crcs || []).map((c) => c.crc).join('<br>');
   const num = padNum(g.imageNumber || g.index);
