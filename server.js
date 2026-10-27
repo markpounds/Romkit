@@ -27,7 +27,7 @@ const WEB_DIR = path.join(__dirname, 'web');
 const WEB_EMBED = (typeof globalThis !== 'undefined' && globalThis.__ROMKIT_WEB__) || null;
 /** 监听地址：默认仅本机（安全）；NAS 等场景可用 ROMKIT_HOST=0.0.0.0 开放局域网 */
 const HOST = process.env.ROMKIT_HOST || '127.0.0.1';
-const VERSION = '2.15.9';
+const VERSION = '2.15.10';
 // 进程 umask：飞牛/NAS 等服务环境下可能默认 077，会让 ROMKit 整理出来的
 // 文件（0600）和目录（0700）对同机其他用户（含 SMB 共享）完全不可读，
 // 表现为「整理完就打不开 / 扫描时报权限不足」。这里统一放宽到 022。
@@ -123,6 +123,22 @@ async function scanStatsOf(lib) {
     }
   } catch (_) {}
   return { games: 0, owned: 0 };
+}
+
+/**
+ * DAT 内容指纹：版本 + 条目数 + 每条序号与 CRC。
+ * 用来判断「更新 DAT」下载回来的东西和原来是不是同一份 ——
+ * 一样就没必要把扫描结果作废重扫。
+ */
+function datSignature(dat) {
+  if (!dat) return '';
+  const h = crypto.createHash('sha1');
+  h.update(String(dat.datVersion || ''));
+  h.update('|' + (dat.games ? dat.games.length : 0));
+  for (const g of dat.games || []) {
+    h.update('|' + g.index + ':' + (g.crcs || []).map((c) => c.crc + c.extension).join(','));
+  }
+  return h.digest('hex');
 }
 
 function taskSnapshot(t) {
@@ -801,6 +817,9 @@ async function handleApi(req, res, url) {
       const body = await readJson(req);
       if (body.settings) {
         lib.settings = { ...lib.settings, ...body.settings };
+        // 输出目录/模板/形态都影响整理计划，待整理结果必须重算
+        const rt = runtime.get(lib.id);
+        if (rt) rt.pending = null;
       }
       if (body.assets) {
         lib.assets = { ...lib.assets, ...body.assets };
@@ -1007,8 +1026,12 @@ async function handleApi(req, res, url) {
     if (action === '/pending' && method === 'GET') {
       const rt = await hydrateLibrary(lib);
       if (!rt.scan) return json(res, 200, { ...EMPTY_PENDING });
+      // 算一次就缓存：切换清单时会频繁请求，每次都重建计划太贵
+      if (rt.pending) return json(res, 200, rt.pending);
       try {
-        return json(res, 200, await computePending(lib, rt.scan, rt.dat));
+        const info = await computePending(lib, rt.scan, rt.dat);
+        rt.pending = info;
+        return json(res, 200, info);
       } catch (e) {
         return json(res, 200, { ...EMPTY_PENDING, reason: e.message });
       }
@@ -1096,7 +1119,17 @@ async function handleApi(req, res, url) {
       const busy = [...tasks.values()].some((t) => t.libraryId === lib.id && t.status === 'running');
       if (busy) return json(res, 409, { error: '该库已有任务在运行' });
       const task = createTask('update', lib.id, async ({ setProgress }) => {
+        // 先记下更新前的 DAT 与扫描结果：如果这次下载回来的 DAT 和原来
+        // 完全一样（版本没变、条目与 CRC 全同），就不能把扫描进度清掉，
+        // 否则用户只是点了下「更新 DAT」就得整库重扫一遍。
+        const rt0 = await hydrateLibrary(lib).catch(() => null);
+        const oldDat = rt0 && rt0.dat;
+        const oldScan = rt0 && rt0.scan;
+        const oldSig = oldDat ? datSignature(oldDat) : '';
+
         const resu = await downloadDat(lib, setProgress);
+        const unchanged = !!oldSig && oldSig === datSignature(resu.dat);
+
         lib.datPath = resu.datPath;
         lib.datVersion = resu.datVersion;
         lib.datName = resu.dat.datName;
@@ -1105,12 +1138,18 @@ async function handleApi(req, res, url) {
         lib.datConfig = { newDat: resu.dat.newDat, romTitle: resu.dat.romTitle };
         lib.error = null;
         lib.updatedAt = new Date().toISOString();
-        runtime.set(lib.id, { dat: resu.dat, scan: null, error: null });
+        runtime.set(lib.id, {
+          dat: resu.dat,
+          // 内容没变就沿用原来的扫描结果，界面上的拥有数/待整理都不动
+          scan: unchanged ? (oldScan || null) : null,
+          error: null,
+          pending: unchanged ? (rt0 && rt0.pending) : null,
+        });
         await store.save();
 
         // 更新完自动把新 DAT 的图片下载到设置好的图片保存位置（失败不影响 DAT 更新结果）
         const cov = lib.assets && lib.assets.cover;
-        if (cov && cov.enabled) {
+        if (cov && cov.enabled && !unchanged) {
           try {
             setProgress({ phase: 'covers', message: '正在下载图片…' });
             const stat = await covers.fetchMissing(lib, resu.dat, { onProgress: setProgress });
@@ -1118,17 +1157,19 @@ async function handleApi(req, res, url) {
             return {
               datVersion: resu.datVersion,
               games: resu.dat.games.length,
+              unchanged,
               covers: { ok: stat.ok || 0, skipped: stat.skipped || 0, fail: stat.fail || 0, dir: covers.cacheDirFor(lib) },
             };
           } catch (e) {
             return {
               datVersion: resu.datVersion,
               games: resu.dat.games.length,
+              unchanged,
               covers: { fail: -1, error: e.message },
             };
           }
         }
-        return { datVersion: resu.datVersion, games: resu.dat.games.length, covers: null };
+        return { datVersion: resu.datVersion, games: resu.dat.games.length, unchanged, covers: null };
       });
       return json(res, 200, { task: taskSnapshot(task) });
     }

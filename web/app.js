@@ -729,10 +729,33 @@ async function selectLib(id) {
   refreshStatus(); // 切到某个 DAT 时，顶栏显示它自己的进度
   const lib = S.libs.find((l) => l.id === id);
   if (!lib) return;
+  // 待整理是「每个清单各自一份」的状态，切换时必须重新取，
+  // 否则会沿用上一个清单的标记和数量（表现为切过去标记就没了）
+  await loadPending();
   renderHeader(lib);
   await loadGames();
   // 常驻详情：默认展示列表第一个游戏
   if (S.games.length) openDetail(S.games[0].index);
+}
+
+/** 取当前清单的待整理统计（服务端有缓存，切清单时调用开销很小） */
+async function loadPending() {
+  if (!S.currentId) {
+    S.pending = new Set();
+    S.pendingInfo = null;
+    renderPendingBadge();
+    return;
+  }
+  try {
+    const info = await api(`/libraries/${S.currentId}/pending`);
+    S.pending = new Set(info.indexes || []);
+    S.pendingInfo = { total: info.total || 0, pending: info.pending || 0 };
+  } catch (_) {
+    S.pending = new Set();
+    S.pendingInfo = null;
+  }
+  renderPendingBadge();
+  renderStats();
 }
 
 function renderHeader(lib) {
@@ -854,14 +877,22 @@ function renderStats() {
   const missing = st.missing != null ? st.missing : total - owned;
   const dup = st.duplicates || 0;
   const pct = total ? Math.round((owned / total) * 100) : 0;
+  // 待整理跟着清单走，放在统计栏里比只在右上角按钮上更醒目
+  const pend = S.pendingInfo ? (S.pendingInfo.pending || 0) : 0;
+  const pendCell = `<div class="stat warn clickable${S.pendingOnly ? ' on' : ''}" id="statPending" title="${pend ? '点击只看待整理项' : '没有待整理项'}">
+      <div class="v">${fmtNum(pend)}</div><div class="k">待整理</div>
+    </div>`;
   $('#statsBar').innerHTML = `
     <div class="stat accent"><div class="v">${pct}%</div><div class="k">收集进度</div></div>
     <div class="stat"><div class="v">${fmtNum(total)}</div><div class="k">清单总数</div></div>
     <div class="stat ok"><div class="v">${fmtNum(owned)}</div><div class="k">已拥有</div></div>
     <div class="stat bad"><div class="v">${fmtNum(missing)}</div><div class="k">缺失</div></div>
     <div class="stat warn"><div class="v">${fmtNum(dup)}</div><div class="k">多份副本</div></div>
+    ${pendCell}
     <div class="stat"><div class="v" style="font-size:12px;font-weight:500;padding-top:4px">${st.scannedAt ? timeAgo(st.scannedAt) : '未扫描'}</div><div class="k">上次扫描</div></div>
   `;
+  const cell = document.getElementById('statPending');
+  if (cell) cell.onclick = () => togglePendingOnly();
 }
 
 function timeAgo(iso) {
@@ -1359,12 +1390,19 @@ async function bulkRun(kind) {
 
   S.bulkBusy = true;
   let ok = 0;
+  let noUpdate = 0;
   const fails = [];
   try {
     for (let i = 0; i < list.length; i++) {
       const lib = list[i];
       setStatus(`${label} ${i + 1}/${list.length}：${lib.name}`, true);
       try {
+        // 批量更新先问一句版本，没新版本就直接跳过 ——
+        // 否则会把整份 DAT 下载一遍，即使内容没变
+        if (kind === 'update') {
+          const info = await api(`/libraries/${lib.id}/check-update`, { method: 'POST' }).catch(() => null);
+          if (info && info.ok && !info.hasUpdate) { noUpdate++; continue; }
+        }
         const r = await api(`/libraries/${lib.id}/${seg}`, {
           method: 'POST',
           body: kind === 'organize' ? { dryRun: false } : {},
@@ -1381,9 +1419,9 @@ async function bulkRun(kind) {
   }
 
   await loadState();
-  if (S.currentId) await loadGames();
+  if (S.currentId) { await loadPending(); await loadGames(); }
   toast(
-    `${label}完成：${ok} 个成功${fails.length ? `，${fails.length} 个失败` : ''}${skip ? `（跳过 ${skip} 个）` : ''}`,
+    `${label}完成：${ok} 个成功${noUpdate ? `，${noUpdate} 个已是最新` : ''}${fails.length ? `，${fails.length} 个失败` : ''}${skip ? `（跳过 ${skip} 个）` : ''}`,
     fails.length ? 'warn' : 'ok',
     8000,
   );
@@ -1457,17 +1495,24 @@ function showPlan(plan) {
     ${plan.duplicateSkipped ? `<div class="plan-warn">有 ${plan.duplicateSkipped} 个压缩包里装着多个游戏，为避免误伤没有移动，可按需手动处理。</div>` : ''}
     ${plan.warning ? `<div class="plan-warn">⚠ ${esc(plan.warning)}</div>` : ''}
   `;
-  $('#planBody').innerHTML = plan.items.map((it) => `
+  // 预览只列「会发生变化」的条目：已就位、跳过这些不需要动手的没必要占屏，
+  // 否则真正要处理的几行会被大片"已就位"淹没
+  const changing = plan.items.filter((it) => it.action !== 'already' && it.action !== 'skip');
+  const hiddenRows = plan.items.length - changing.length;
+  $('#planBody').innerHTML = changing.length
+    ? changing.map((it) => `
     <tr>
       <td><span class="act ${it.action}">${actionLabelOf(it.action, plan.operation === 'move')}</span></td>
       <td>${esc(it.title)}${it.reason ? `<br><span class="muted" style="font-size:10.5px">${esc(it.reason)}</span>` : ''}</td>
       <td class="mono" style="font-size:10.5px;color:var(--text-3)">${esc(it.source)}</td>
       <td class="mono" style="font-size:10.5px">${esc(it.dest)}</td>
       <td class="num mono">${fmtSize(it.size)}</td>
-    </tr>`).join('');
-  $('#planHint').textContent = plan.total > plan.items.length
-    ? `仅显示前 ${plan.items.length} 项，共 ${plan.total} 项`
-    : '';
+    </tr>`).join('')
+    : '<tr><td colspan="5" style="text-align:center;padding:28px;color:var(--text-3)">没有需要处理的条目，所有文件都已在目标位置</td></tr>';
+  $('#planHint').textContent = [
+    hiddenRows > 0 ? `已隐藏 ${hiddenRows} 条无需处理的条目（已就位 / 跳过）` : '',
+    plan.total > plan.items.length ? `清单较大，仅载入前 ${plan.items.length} 项（共 ${plan.total} 项）` : '',
+  ].filter(Boolean).join('　·　');
   $('#planModal').classList.add('show');
   $('#planRun').onclick = async () => {
     const delCount = plan.items.filter((i) => i.action === 'delete-duplicate').length;
@@ -1571,12 +1616,17 @@ function renderPendingBadge() {
   const n = S.pending ? S.pending.size : 0;
   el.hidden = !n;
   el.textContent = n ? `待整理 ${n}` : '';
-  el.onclick = () => {
-    S.pendingOnly = !S.pendingOnly;
-    el.classList.toggle('on', S.pendingOnly);
-    applyFilter();
-    toast(S.pendingOnly ? '只看待整理项' : '显示全部', 'ok', 2500);
-  };
+  el.classList.toggle('on', !!S.pendingOnly);
+  el.onclick = () => togglePendingOnly();
+}
+
+/** 「只看待整理项」开关：徽标和统计栏里的待整理格子共用 */
+function togglePendingOnly() {
+  S.pendingOnly = !S.pendingOnly;
+  renderPendingBadge();
+  renderStats();
+  applyFilter();
+  toast(S.pendingOnly ? '只看待整理项' : '显示全部', 'ok', 2500);
 }
 
 /** 顶栏只反映「当前选中 DAT」的任务；没有运行中的任务时回到就绪 */
@@ -1738,12 +1788,19 @@ function onTask(t) {
       }, 300);
     }
   } else if (t.kind === 'update') {
+    const r0 = t.result || {};
+    // 下载回来的 DAT 与原来一模一样：扫描结果原样保留，别提示用户去重扫
+    if (r0.unchanged) {
+      toast(`DAT 内容没有变化（v${r0.datVersion}，${r0.games} 个游戏），扫描进度已保留`, 'ok', 5000);
+      loadState().then(() => loadGames());
+      return;
+    }
     const cv = t.result && t.result.covers;
     const cvText = !cv ? ''
       : cv.fail === -1 ? `<br><span style="font-size:11px">图片下载失败：${esc(cv.error || '')}</span>`
         : `<br><span style="font-size:11px">图片：新增 ${cv.ok || 0}，已有 ${cv.skipped || 0}，失败 ${cv.fail || 0}${cv.dir ? `（保存到 ${esc(cv.dir)}）` : ''}</span>`;
     toast(`DAT 已更新到 v${t.result.datVersion}（${t.result.games} 个游戏）${cvText}`, cv && cv.fail ? 'warn' : 'ok', 6000);
-    loadState().then(() => loadGames());
+    loadState().then(async () => { await loadPending(); await loadGames(); });
   } else if (t.kind === 'covers') {
     const r = t.result || {};
     const msg = `截图下载完成：成功 ${r.ok || 0}，已有跳过 ${r.skipped || 0}，失败 ${r.fail || 0}`;

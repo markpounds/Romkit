@@ -1,5 +1,5 @@
 appname               = romkit
-version               = 2.15.9
+version               = 2.15.10
 display_name          = ROMKit 游戏库整理
 desc                  = 本地 ROM 清单整理工具，完全兼容 OfflineList DAT 格式。导入 DAT 后自动匹配 ROM 文件并归类整理，每个清单可独立配置 ROM 源目录、输出目录与保留格式（压缩包/原始文件）。
 source                = thirdparty
