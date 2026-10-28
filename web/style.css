@@ -448,6 +448,52 @@ button, input, select, textarea { font: inherit; color: inherit; }
   .actions-wrap { align-items: flex-end; }
 }
 
+/* 条目编辑弹窗 */
+.ov-conflict {
+  background: rgba(217, 119, 6, .10); border: 1px solid var(--warn);
+  border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; font-size: 12px;
+}
+.ov-conflict b { color: var(--warn); }
+.ov-conflict ul { margin: 6px 0 4px; padding-left: 18px; color: var(--text-2); }
+.ov-files { display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow-y: auto; }
+.ov-file {
+  display: flex; gap: 6px; align-items: center;
+  padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); font-size: 11.5px;
+}
+.ov-file .input { padding: 3px 7px; font-size: 11.5px; }
+.ov-file .of-label { flex: 0 0 88px; }
+.ov-file .of-crc { flex: 1 1 110px; min-width: 0; font-family: var(--mono); }
+.ov-file .of-ext { flex: 0 0 64px; font-family: var(--mono); }
+.ov-file .of-size { flex: 0 0 86px; }
+.ov-file .of-del {
+  flex: none; border: 0; background: none; color: var(--text-3); cursor: pointer;
+  font-size: 13px; padding: 2px 4px; border-radius: 4px; line-height: 1;
+}
+.ov-file .of-del:hover { color: var(--bad); background: var(--bad-soft, rgba(220,38,38,.12)); }
+.ov-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px;
+}
+.ov-grid .field { min-width: 0; }
+.ov-pick { max-height: 190px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; margin-top: 6px; }
+.ov-pick-row {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
+  border-bottom: 1px solid var(--border); font-size: 12px; cursor: pointer;
+}
+.ov-pick-row:last-child { border-bottom: 0; }
+.ov-pick-row:hover { background: var(--accent-soft); }
+.ov-pick-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 名称+大小 匹配诊断 */
+.size-check { display: flex; flex-direction: column; gap: 6px; margin-top: 2px; }
+.sc-row { display: flex; gap: 8px; align-items: flex-start; font-size: 11.5px; }
+.sc-k {
+  flex: 0 0 auto; font-size: 10px; padding: 1px 6px; border-radius: 4px;
+  background: var(--bg); color: var(--text-3); border: 1px solid var(--border);
+}
+.sc-k.bad { color: var(--bad); border-color: var(--bad); }
+.sc-k.warn { color: var(--warn); border-color: var(--warn); }
+
 /* ---------------- 表格 ---------------- */
 .table-wrap {
   flex: 1; overflow: auto; min-height: 0; position: relative;
@@ -1004,6 +1050,70 @@ tbody tr { }
 .dt-thumb.add:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .dt-thumb.add .plus { font-size: 20px; line-height: 1; font-weight: 300; }
 .dt-thumb.add span:last-child { font-size: 10px; }
+/* 缩略图栏的「视频」入口：站点链接里有 B 站视频时出现 */
+.dt-thumb.video {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-2);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 3px; cursor: pointer;
+}
+.dt-thumb.video:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.dt-thumb.video.on { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+/* 播放三角平时藏在封面图下面：封面加载中/失败时露出来当占位 */
+.dt-thumb.video .vwrap {
+  position: relative; width: 58px; height: 34px;
+  background: #0e1116; border-radius: 3px; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+}
+.dt-thumb.video .vwrap .play {
+  width: 0; height: 0;
+  border-left: 12px solid #e8ecf2;
+  border-top: 7px solid transparent;
+  border-bottom: 7px solid transparent;
+  margin: 0;
+}
+.dt-thumb.video .vthumb {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; display: block;
+}
+.dt-thumb.video span:last-child { font-size: 10px; }
+/* 大图区直接内嵌 B 站播放器：自带控制栏只在 hover 浮现，这里再叠一条常驻进度条 */
+.detail-cover.video-mode { max-height: none; overflow: visible; display: block; padding: 0; }
+.dt-video-wrap {
+  width: 100%; aspect-ratio: 16 / 9; background: #000;
+  border-radius: 6px; overflow: hidden;
+}
+.dt-video-wrap iframe.dt-video {
+  width: 100%; height: 100%; border: 0; display: block; background: #000;
+}
+/* 常驻播放控制条（进度条 + 时间 + 播放/静音）—— 不依赖 B 站原生控制栏 */
+.dt-video-ctrl {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 8px; padding: 6px 8px;
+  background: #0e1116; border-radius: 6px;
+}
+.dt-vbtn {
+  border: 0; background: transparent; color: #cfd6e0; cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 2px 5px; border-radius: 4px; flex: none;
+}
+.dt-vbtn:hover { background: rgba(255, 255, 255, .14); color: #fff; }
+.dt-progress {
+  flex: 1; min-width: 0; height: 6px; border-radius: 4px;
+  background: rgba(255, 255, 255, .18); position: relative; cursor: pointer; overflow: hidden;
+}
+.dt-progress-buf {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+  background: rgba(255, 255, 255, .28);
+}
+.dt-progress-play {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 0;
+  background: var(--accent); border-radius: 4px; transition: width .12s linear;
+}
+.dt-vtime {
+  font-family: var(--mono); font-size: 10.5px; color: #cfd6e0;
+  white-space: nowrap; min-width: 80px; text-align: right; flex: none;
+}
 .dt-thumb {
   position: relative; width: 62px; border-radius: 5px; overflow: hidden;
   border: 2px solid transparent; cursor: pointer; background: #0e1116;
@@ -1036,6 +1146,17 @@ tbody tr { }
 .df dd.mono { font-family: var(--mono); font-size: 11.5px; }
 .df dd .tag { margin: 0 3px 3px 0; }
 
+.file-tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 10px 0 2px; }
+.ft-tab {
+  border: 1px solid var(--border); background: var(--bg); color: var(--text-2);
+  font-size: 11px; padding: 3px 10px; border-radius: 12px; cursor: pointer;
+}
+.ft-tab:hover { color: var(--accent); border-color: var(--accent); }
+.ft-tab.on { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.ft-cur { color: var(--accent); font-weight: 620; }
+.sc-row.cur { background: var(--accent-soft); border-radius: 6px; }
+.file-item.cur { border-color: var(--accent); }
+
 .detail-section {
   font-size: 11px; color: var(--text-3); margin: 16px 0 6px;
 }
@@ -1058,6 +1179,39 @@ tbody tr { }
 tbody tr { cursor: pointer; }
 .act.move-unmatched { color: var(--warn); border-color: var(--warn); }
 .act.delete-duplicate { color: var(--bad); border-color: var(--bad); }
+
+/* 站点信息（dat.emugif.com 的发布链接 + 发布说明） */
+.site-box {
+  padding: 9px 10px; border-radius: 7px; background: var(--bg);
+  border: 1px solid var(--border);
+}
+.site-label {
+  font-size: 10.5px; color: var(--text-3); margin-bottom: 4px;
+}
+.site-link {
+  display: block; font-size: 11.5px; line-height: 1.5; color: var(--accent);
+  word-break: break-all; text-decoration: none; margin-bottom: 3px;
+}
+.site-link:hover { text-decoration: underline; }
+.site-comment {
+  font-size: 11.5px; line-height: 1.65; color: var(--text-2);
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 260px; overflow: auto;
+}
+.site-more {
+  float: right; font-size: 10.5px; color: var(--accent); text-decoration: none;
+}
+.site-more:hover { text-decoration: underline; }
+.site-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--border);
+  font-size: 10.5px; color: var(--text-3);
+}
+.site-foot .btn-link {
+  background: none; border: 0; padding: 0; cursor: pointer;
+  font-size: 10.5px; color: var(--accent);
+}
+.site-foot .btn-link:hover { text-decoration: underline; }
 
 /* 图片地址测试结果 */
 .probe-row {

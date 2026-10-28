@@ -35,6 +35,9 @@ const S = {
   libTask: {},  // libId -> 该 DAT 最近的任务 id
   pending: new Set(), // 待整理的游戏 index（扫描后算出）
   pendingInfo: null,  // { total, pending }
+  sites: {},          // index -> 站点数据（发布链接 / 发布说明），来自 /games 一起下发
+  siteInfo: null,     // 当前库的站点数据概况 { supported, consoleType, synced, … }
+  dtVideo: false,     // 详情大图正在播 B 站视频（而不是显示封面/截图）
 };
 
 const PAGE = 300;
@@ -731,6 +734,7 @@ async function selectLib(id) {
   // 否则会沿用上一个清单的标记和数量（表现为切过去标记就没了）
   await loadPending();
   renderHeader(lib);
+  await loadSiteInfo();
   await loadGames();
   // 常驻详情：默认展示列表第一个游戏
   if (S.games.length) openDetail(S.games[0].index);
@@ -763,7 +767,13 @@ function renderHeader(lib) {
     bits.push(`<span title="${esc(pf.raw || pf.short)}"><b>平台</b> ${esc(pf.short)}</span>`);
   }
   bits.push(`<span><b>DAT</b> v${lib.datVersion}</span>`);
-  if (lib.extensions && lib.extensions.length) bits.push(`<span><b>格式</b> ${esc(lib.extensions.join(' '))}</span>`);
+  if (lib.folderType) {
+    // 文件夹型清单：一个游戏是一个目录，没有单一文件类型，显示「文件夹」即可，
+    // 不再把上百种扩展名铺成一长串
+    bits.push('<span><b>格式</b> 文件夹</span>');
+  } else if (lib.extensions && lib.extensions.length) {
+    bits.push(`<span><b>格式</b> ${esc(lib.extensions.join(' '))}</span>`);
+  }
   if (lib.settings.romDir) bits.push(`<span title="${esc(lib.settings.romDir)}"><b>ROM</b> ${esc(shortPath(lib.settings.romDir))}</span>`);
   else bits.push('<span style="color:var(--warn)">未设置 ROM 目录</span>');
   if (lib.settings.outDir) bits.push(`<span title="${esc(lib.settings.outDir)}"><b>输出</b> ${esc(shortPath(lib.settings.outDir))}</span>`);
@@ -851,10 +861,110 @@ async function loadGames() {
   if (!S.currentId) return;
   const data = await api(`/libraries/${S.currentId}/games`);
   S.games = data.games || [];
+  S.sites = data.sites || {};
   S.stats = data.stats || null;
+  // 文件夹型清单（每个游戏是目录、由多文件构成）：从游戏数据回填到当前库对象，
+  // 并重渲染头部，让「格式」栏显示「文件夹」而不是把扩展名铺开
+  const lib = S.libs.find((l) => l.id === S.currentId);
+  if (lib) {
+    const ft = !!data.folderType;
+    if (lib.folderType !== ft) { lib.folderType = ft; renderHeader(lib); }
+  }
   renderStats();
   await loadCovers();
   applyFilter();
+}
+
+/** 站点数据概况（能不能取、有没有同步过、命中多少条） */
+async function loadSiteInfo() {
+  if (!S.currentId) { S.siteInfo = null; return; }
+  try {
+    S.siteInfo = await api(`/libraries/${S.currentId}/site`);
+  } catch (_) {
+    S.siteInfo = null;
+  }
+}
+
+/** 手动拉一次站点数据（发布链接 + 发布说明），服务端按机种缓存 */
+async function syncSite(force) {
+  if (!S.currentId) return;
+  const info = S.siteInfo;
+  if (info && !info.supported) {
+    toast('这个 DAT 不是来自 dat.emugif.com，没有站点数据可取', 'warn', 5000);
+    return;
+  }
+  try {
+    const { task } = await api(`/libraries/${S.currentId}/site/sync`, { method: 'POST', body: { force: !!force } });
+    if (task) S.tasks[task.id] = task;
+    toast('正在下载站点数据…', 'ok', 3000);
+  } catch (e) {
+    toast('同步失败：' + esc(e.message || e), 'err', 5000);
+  }
+}
+
+function syncSiteAndClose() {
+  syncSite(true);
+}
+
+/** 详情页里的「站点信息」区块：发布链接（可点）+ 发布说明 */
+function siteBlock(g, view) {
+  const info = S.siteInfo;
+  if (info && !info.supported) return ''; // 不是 emugif 的库，整个区块不出现
+
+  const idx = view && view.index != null ? view.index : g.index;
+  const raw = S.sites[idx] || S.sites[g.index];
+  // 两个都没有就等于没有（服务端已过滤过，这里再兜一次底）
+  const site = raw && ((raw.links && raw.links.length) || raw.comment) ? raw : null;
+
+  if (!info || !info.synced) {
+    return `<div class="detail-section">站点信息 <span class="pill">未同步</span></div>
+      <div class="site-box">
+        <div class="hint">可获取 dat.emugif.com 上的发布链接与发布说明（DAT 里没有这两项）。</div>
+        <button class="btn ghost" id="btnSiteSync" style="margin-top:8px">获取站点数据</button>
+      </div>`;
+  }
+  if (!site) {
+    return `<div class="detail-section">站点信息
+        <span class="pill">已同步 ${info.matched}/${info.games}</span></div>
+      <div class="site-box">
+        <div class="hint">站点上没有这一条的信息${info.consoleType ? `（机种 ${esc(info.consoleType)}）` : ''}。</div>
+        ${siteFoot(info)}
+      </div>`;
+  }
+  const links = (site.links || []).filter(Boolean);
+  const linkHtml = links.length
+    ? links.map((u) => {
+        // B 站视频链接顺便标出来 —— 缩略图栏的「视频」就是取它播放的
+        const isV = /BV[0-9A-Za-z]{10}/.test(u);
+        return `<a class="site-link" href="${esc(u)}" target="_blank" rel="noreferrer">${esc(u)}${isV ? ' <span class="pill">视频</span>' : ''}</a>`;
+      }).join('')
+    : '<div class="hint">无发布链接</div>';
+  const comment = String(site.comment || '').trim();
+  const commentHtml = comment
+    ? `<div class="site-comment">${esc(comment)}</div>`
+    : '<div class="hint">无发布说明</div>';
+  return `<div class="detail-section">站点信息
+      ${site.url ? `<a class="site-more" href="${esc(site.url)}" target="_blank" rel="noreferrer">在站点打开 ↗</a>` : ''}
+    </div>
+    <div class="site-box">
+      <div class="site-label">发布链接</div>
+      ${linkHtml}
+      <div class="site-label" style="margin-top:8px">发布说明</div>
+      ${commentHtml}
+      ${siteFoot(info)}
+    </div>`;
+}
+
+/** 站点区块底部：同步时间 + 重新获取的入口 */
+function siteFoot(info) {
+  const t = info && info.fetchedAt ? new Date(info.fetchedAt) : null;
+  const when = t
+    ? `${t.getFullYear()}-${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')} ${String(t.getHours()).padStart(2, '0')}:${String(t.getMinutes()).padStart(2, '0')}`
+    : '';
+  return `<div class="site-foot">
+    <span class="muted">${when ? '同步于 ' + when : ''}${info && info.consoleType ? ` · 机种 ${esc(info.consoleType)}` : ''}</span>
+    <button class="btn-link" id="btnSiteRefresh">重新获取</button>
+  </div>`;
 }
 
 async function loadCovers(forceRows) {
@@ -1055,7 +1165,10 @@ function rowOf(g) {
   const rc = regionOf(g);
   const flag = FLAG_SVG[rc.key] || FLAG_SVG.un;
   const langs = langTags(g);
-  const crc = (g.crcs || []).map((c) => c.crc).join('<br>');
+  // 多文件（文件夹）条目：CRC 列只显示文件数，不把上百个 CRC 逐个铺开
+  const crc = g.multiFile
+    ? `<span class="muted">${(g.crcs || []).length} 个文件</span>`
+    : (g.crcs || []).map((c) => c.crc).join('<br>');
   const num = padNum(g.imageNumber || g.index);
 
   tr.innerHTML = `
@@ -1076,7 +1189,13 @@ function rowOf(g) {
 function padNum(n) { return String(n || 0).padStart(4, '0'); }
 
 function openCover(index, slot = 'a') {
-  const g = S.games.find((x) => x.index === index);
+  // 合并条目：子条目的编号不在列表里，封面弹窗要认它（标题也用子条目的）
+  let g = S.games.find((x) => x.index === index);
+  if (!g && S.detailGame && (S.detailGame.children || []).length) {
+    const kid = S.detailGame.children.find((c) => c.index === index);
+    if (kid) g = { ...kid, index };
+  }
+  if (!g) g = S.detailGame;
   if (!g) return;
   S.coverGame = g;
   S.coverSlot = slot;
@@ -1155,37 +1274,115 @@ function openDetail(index) {
   const statusText = { owned: '已拥有', missing: '缺失', duplicate: '多份副本', unknown: '未扫描' }[g.status] || '未扫描';
   const from = S.covers[index];
 
+  /*
+   * 合并条目 = 一条总条目（编号沿用最小的那个 + 中文名/英文名）
+   *           + 若干子条目（被合并进来的原条目）。
+   * 页签用子条目的原编号（0023 / 0024），切换后下面所有信息、
+   * 封面图片都跟着切 —— 各子条目的信息仍可单独编辑。
+   */
+  const kids = (g.children || []).filter((c) => c && c.index != null);
+  const merged = kids.length > 1;
+  if (!merged) { S.dtChildFor = null; S.dtFileIdx = 0; }
+  else if (S.dtChildFor !== index || S.dtChildIdx == null || S.dtChildIdx >= kids.length) {
+    S.dtChildFor = index;
+    S.dtChildIdx = 0;
+  }
+  const kid = merged ? kids[S.dtChildIdx] : null;
+  const view = kid || g; // 当前在展示哪一份信息
+  const viewNum = padNum(view.imageNumber || view.index);
+  const viewRegion = (view.tags || []).find((t) => REGION_TAGS.test(t)) || view.location || '—';
+  const viewLang = (view.tags || []).find((t) => LANG_TAGS.test(t)) || view.language || '—';
+  const crcList = view.crcs || [];
+  const curCrc = (crcList[0] || {}).crc || '';
+  // 当前展示的这份信息对应的文件（用于高亮）
+  const hlCrcs = new Set(crcList.map((c) => (c.crc || '').toLowerCase()).filter(Boolean));
+
+  const fileTabs = !merged ? '' : `<div class="file-tabs">${kids.map((c, i) => `
+    <button class="ft-tab${i === S.dtChildIdx ? ' on' : ''}" data-ci="${i}" title="${esc(c.title || '')}">
+      ${esc(padNum(c.imageNumber || c.index))}${c.title ? ` · ${esc(c.title)}` : ''}
+    </button>`).join('')}</div>
+    <div class="desc">合并条目：编号沿用 ${esc(padNum(kids[0].imageNumber || kids[0].index))}，页签切换查看合并进来的原条目（信息、截图一起切）。</div>`;
+  // 封面/截图按子条目的原编号取（合并前各自下载的图片还在）
+  S.dtCoverIdx = merged ? (kid.index != null ? kid.index : index) : index;
+
   const fields = [
-    ['编号', num],
-    ['标题', g.title || '—'],
-    ['英文名', g.comment || '—'],
-    ['发行国家', region],
-    ['发行厂商', g.publisher || '—'],
-    ['发布来源', g.sourceRom || '—'],
-    ['容量大小', g.romSize ? fmtSize(g.romSize) : '—'],
-    ['存档类型', g.saveType || '—'],
-    ['语言', lang],
-    ['CRC', (g.crcs || []).map((c) => c.crc).join(' / ') || '—'],
+    ['编号', viewNum],
+    ['标题', view.title || '—'],
+    ['英文名', view.comment || '—'],
+    ['发行国家', viewRegion],
+    ['发行厂商', view.publisher || '—'],
+    ['发布来源', view.sourceRom || '—'],
+    ['容量大小', view.romSize ? fmtSize(view.romSize) : '—'],
+    ['存档类型', view.saveType || '—'],
+    ['语言', viewLang],
+    ['CRC', g.multiFile
+      ? `<span class="muted">${(g.fileCheck ? `${g.fileCheck.found}/${g.fileCheck.total} 个文件已找到` : (crcList.length + ' 个文件'))}</span>`
+      : (crcList.map((c) => (c.label ? `${c.crc}（${c.label}）` : c.crc)).join(' / ') || '—')],
     ['状态', `<span class="pill ${g.status}">${statusText}</span>`],
   ];
 
-  const files = (g.matches || []).map((m) => `
-    <div class="file-item">
+  // 「名称+大小」模式下把"为什么没匹配上"讲清楚：期望叫什么、多大，实际是什么
+  const sizeBlock = (() => {
+    const sc = g.sizeCheck;
+    if (!sc) return '';
+    const rows = [];
+    for (const name of sc.missing || []) {
+      rows.push(`<div class="sc-row"><span class="sc-k bad">缺失</span><div class="mono">${esc(name)}</div></div>`);
+    }
+    for (const a of sc.actual || []) {
+      rows.push(`<div class="sc-row"><span class="sc-k warn">大小不符</span><div class="mono">${esc(a.name)}<br>
+        <span class="muted">实际 ${fmtSize(a.size)} · 期望 ${fmtSize(a.expected)}</span></div></div>`);
+    }
+    return `<div class="detail-section">匹配诊断 <span class="pill">名称 + 大小</span></div>
+      <div class="size-check">${rows.join('') || '<div class="hint">名称与大小都对上了。</div>'}</div>`;
+  })();
+
+  // 合并条目（多文件）的对号核对：缺哪个文件一目了然
+  const fileCheckBlock = (() => {
+    const fc = g.fileCheck;
+    if (!fc || !(fc.missing || []).length) return '';
+    const rows = fc.missing.map((m) => {
+      const cur = hlCrcs.has((m.crc || '').toLowerCase());
+      // 文件夹型多文件游戏没有 CRC：主行显示相对路径（name），缺哪个文件一目了然；
+      // 有 CRC 的单文件游戏则照旧显示 CRC。标签 / 扩展名 / 大小作为次要信息。
+      const primary = m.name ? esc(m.name) : (m.crc || '无 CRC');
+      const sub = [
+        m.crc ? esc(m.crc) : '',
+        m.label ? esc(m.label) : '',
+        m.ext ? esc(m.ext) : '',
+        m.size ? fmtSize(m.size) : '',
+      ].filter(Boolean).join(' · ');
+      return `<div class="sc-row${cur ? ' cur' : ''}"><span class="sc-k bad">缺失</span>
+      <div class="mono">${primary}${sub ? `<br><span class="muted">${sub}</span>` : ''}</div></div>`;
+    }).join('');
+    return `<div class="detail-section">文件核对 <span class="pill">已找到 ${fc.found}/${fc.total}</span></div>
+      <div class="size-check">${rows}</div>
+      <div class="hint">这一条包含多个文件，需要每个都找到才算已拥有。</div>`;
+  })();
+
+  const files = (g.matches || []).map((m) => {
+    const cur = !!(m.crc && hlCrcs.has(m.crc.toLowerCase()));
+    return `
+    <div class="file-item${cur ? ' cur' : ''}">
       <span class="fi-tag">${m.container === 'zip' ? 'ZIP' : 'FILE'}</span>
       ${esc(m.relPath)}${m.entryName ? `<br><span class="fi-entry">› ${esc(m.entryName)}</span>` : ''}
-      <span class="pill ${m.via === 'name' ? '' : 'ok'}">${m.via === 'name' ? '文件名匹配' : 'CRC 校验'}</span>
+      <span class="pill ${m.via === 'crc' ? 'ok' : ''}">${{ crc: 'CRC 校验', name: '文件名匹配', 'name-size': '名称+大小' }[m.via] || m.via}</span>
       <br><span class="muted">${fmtSize(m.size)}</span>
-    </div>`).join('') || '<div class="hint">清单里还没有找到这个文件。扫描 ROM 目录后再看。</div>';
+    </div>`;
+  }).join('') || '<div class="hint">清单里还没有找到这个文件。扫描 ROM 目录后再看。</div>';
 
   $('#detailBody').innerHTML = `
     <div class="detail-cover" id="detailCover"><div class="empty">加载中…</div></div>
     <div class="detail-thumbs" id="detailThumbs"></div>
     <div class="detail-name">${num} · ${esc(g.title || g.comment || '')}</div>
-    <div class="detail-sub">${esc(g.comment || '')}</div>
+    <div class="detail-sub">${esc(kid ? (kid.comment || kid.title || '') : (g.comment || ''))}</div>
+    ${fileTabs}
 
     <dl class="df">
       ${fields.map(([k, v]) => `<dt>${k}</dt><dd class="${k === 'CRC' ? 'mono' : ''}">${typeof v === 'string' && v.includes('<span') ? v : esc(v)}</dd>`).join('')}
     </dl>
+
+    ${siteBlock(g, view)}
 
     <div class="detail-section">
       整理
@@ -1197,6 +1394,7 @@ function openDetail(index) {
       <button class="btn primary" id="btnOrganizeOne" ${(g.matches || []).length ? '' : 'disabled'}>
         整理这一条
       </button>
+      <button class="btn ghost" id="btnEditEntry">编辑条目${g.overrideId ? '（已修改）' : ''}</button>
       <span class="hint">${(g.matches || []).length
         ? '按当前清单的输出设置，把这一条的文件整理到输出目录（不影响其他条目）'
         : '这一条还没匹配到文件，先扫描 ROM 目录'}</span>
@@ -1204,14 +1402,420 @@ function openDetail(index) {
 
     <div class="detail-section">文件位置</div>
     ${files}
+    ${fileCheckBlock}
+    ${sizeBlock}
   `;
   const btnOne = $('#btnOrganizeOne');
   if (btnOne) btnOne.onclick = () => organizeOne(g.index);
-
+  const btnEdit = $('#btnEditEntry');
+  if (btnEdit) btnEdit.onclick = () => openOverrideModal(g);
+  const btnSite = $('#btnSiteSync');
+  if (btnSite) btnSite.onclick = () => syncSite(true);
+  const btnSiteR = $('#btnSiteRefresh');
+  if (btnSiteR) btnSiteR.onclick = () => syncSite(true);
+  $$('#detailBody .ft-tab').forEach((b) => {
+    b.onclick = () => {
+      S.dtChildIdx = Number(b.dataset.ci);
+      openDetail(index);
+    };
+  });
   // 常驻面板：只更新内容 + 高亮选中行
   S.detailGame = g;
   $$('#gameBody tr').forEach((tr) => tr.classList.toggle('selected', Number(tr.dataset.index) === index));
-  loadDetailImages(index);
+  // 合并条目：截图按当前子条目的原编号取
+  loadDetailImages(merged ? S.dtCoverIdx : index);
+}
+
+/* ------------------------------------------------------------------ 条目编辑 */
+
+const OV = {
+  game: null, entry: null, picked: new Map(), files: [], base: {}, members: [], labelMemo: {},
+  kids: [], childFields: new Map(), childIdx: 0,
+};
+
+/** "4MB" / "512KB" / "4096" → 字节数；空串返回 0，看不懂返回 NaN */
+function parseSizeInput(s) {
+  const t = String(s || '').trim().toUpperCase();
+  if (!t) return 0;
+  const m = t.match(/^([\d.]+)\s*(B|KB|MB|GB|K|M|G)?$/);
+  if (!m) return NaN;
+  const n = parseFloat(m[1]);
+  if (!Number.isFinite(n)) return NaN;
+  const u = m[2] || 'B';
+  const mul = u[0] === 'G' ? 1024 ** 3 : u[0] === 'M' ? 1024 ** 2 : u[0] === 'K' ? 1024 : 1;
+  return Math.round(n * mul);
+}
+
+function renderOvFiles() {
+  const list = OV.files;
+  // 每个文件属于哪个子条目（原编号）
+  const ownerOf = {};
+  for (const k of OV.kids) {
+    for (const f of k.files || []) ownerOf[(f.crc || '').toUpperCase()] = k.index;
+  }
+  $('#ovFileCount').textContent = list.length ? `（${list.length} 个）` : '';
+  $('#ovFiles').innerHTML = list.length
+    ? list.map((f, i) => `<div class="ov-file" data-i="${i}">
+        <span class="mono muted" title="来自哪个原条目">${esc(ownerOf[f.crc] != null ? padNum(ownerOf[f.crc]) : '—')}</span>
+        <input class="input of-label" data-k="label" value="${esc(f.label || '')}" placeholder="标签">
+        <input class="input of-crc" value="${esc(f.crc || '')}" placeholder="无 CRC" readonly title="CRC 来自 DAT，是匹配的依据，不能改">
+        <input class="input of-ext" value="${esc(f.ext || '')}" placeholder=".ws" readonly title="扩展名来自 DAT">
+        <input class="input of-size" data-k="sizeText" value="${esc(f.sizeText || '')}" placeholder="大小">
+      </div>`).join('')
+    : '<div class="hint">这个条目没有声明任何文件。</div>';
+  $$('#ovFiles .ov-file input[data-k]').forEach((inp) => {
+    inp.onchange = () => {
+      const row = inp.closest('.ov-file');
+      const f = OV.files[Number(row.dataset.i)];
+      if (f) f[inp.dataset.k] = inp.value;
+    };
+  });
+}
+
+/** 某个来源条目（按 index）在 DAT 里声明的文件 */
+function srcFilesOf(index) {
+  const m = OV.members.find((x) => x.index === index);
+  if (m) return m.files || [];
+  const g = S.games.find((x) => x.index === index);
+  if (g) {
+    return (g.crcs || []).map((c) => ({
+      crc: (c.crc || '').toUpperCase(),
+      ext: c.extension || '',
+      size: Number(c.size) || g.romSize || 0,
+      label: c.label || '',
+    }));
+  }
+  return [];
+}
+
+function renderOvPick(query) {
+  const q = String(query || '').trim().toLowerCase();
+  const cur = OV.game ? OV.game.index : -1;
+  const hit = (s) => !q || String(s || '').toLowerCase().includes(q);
+  // 已经合并进来的来源条目也列出来（默认勾选，取消勾选 = 从合并里移出）
+  const memRows = OV.members
+    .filter((m) => hit(m.title))
+    .map((m) => `<label class="ov-pick-row">
+        <input type="checkbox" data-idx="${m.index}" ${OV.picked.has(m.index) ? 'checked' : ''}>
+        <span class="mono muted">${padNum(m.imageNumber || m.index)}</span>
+        <span class="ov-pick-title">${esc(m.title || '')}</span>
+        <span class="muted">${m.crcCount || 1} 个文件</span>
+      </label>`);
+  const otherRows = S.games
+    .filter((g) => g.index !== cur && !g.overrideId)
+    .filter((g) => hit(`${g.title || ''} ${g.comment || ''}`))
+    .slice(0, 60)
+    .map((g) => `<label class="ov-pick-row">
+        <input type="checkbox" data-idx="${g.index}" ${OV.picked.has(g.index) ? 'checked' : ''}>
+        <span class="mono muted">${padNum(g.imageNumber || g.index)}</span>
+        <span class="ov-pick-title">${esc(g.title || g.comment || '')}</span>
+        <span class="muted">${(g.crcs || []).length} 个文件</span>
+      </label>`);
+  const rows = memRows.concat(otherRows);
+  $('#ovPick').innerHTML = rows.length
+    ? rows.join('')
+    : '<div class="hint">没有可合并的条目。</div>';
+  $$('#ovPick input[type=checkbox]').forEach((cb) => {
+    cb.onchange = () => {
+      const idx = Number(cb.dataset.idx);
+      if (cb.checked) {
+        OV.picked.set(idx, true);
+        // 勾选来源 → 把它在 DAT 里声明的文件加回来（标签尽量沿用之前设过的）
+        for (const f of srcFilesOf(idx)) {
+          const exists = OV.files.some((x) => (x.crc || '').toUpperCase() === f.crc && (x.ext || '') === (f.ext || ''));
+          if (!exists) {
+            OV.files.push({
+              ext: f.ext || '',
+              size: Number(f.size) || 0,
+              crc: (f.crc || '').toUpperCase(),
+              label: OV.labelMemo[f.crc] || f.label || '',
+              sizeText: f.size ? String(f.size) : '',
+            });
+          }
+        }
+      } else {
+        OV.picked.delete(idx);
+        // 取消来源 → 移走它声明的文件；但仍被其它勾选来源声明的除外
+        const drop = new Set(srcFilesOf(idx).map((f) => (f.crc || '').toUpperCase() + '|' + (f.ext || '')));
+        const keep = new Set();
+        for (const other of OV.picked.keys()) {
+          for (const f of srcFilesOf(other)) keep.add((f.crc || '').toUpperCase() + '|' + (f.ext || ''));
+        }
+        OV.files = OV.files.filter((x) => {
+          const k = (x.crc || '').toUpperCase() + '|' + (x.ext || '');
+          return !drop.has(k) || keep.has(k);
+        });
+      }
+      renderOvFiles();
+      renderOvPick($('#ovSearch').value);
+    };
+  });
+}
+
+/** 子条目可编辑字段（input 元素 id → 字段名） */
+const OV_FIELD_INPUTS = [
+  ['title', '#ovChildTitle'],
+  ['comment', '#ovComment'],
+  ['location', '#ovLocation'],
+  ['publisher', '#ovPublisher'],
+  ['sourceRom', '#ovSourceRom'],
+  ['saveType', '#ovSaveType'],
+  ['language', '#ovLanguage'],
+];
+const OV_ROM_SIZE = '#ovRomSize';
+
+/**
+ * 子条目页签：合并进来的原条目各自可编辑。
+ * 每个子条目的基准值来自 DAT 原始字段（服务端返回的 members），
+ * 只有真正改过的字段才写进覆盖层。
+ */
+function renderOvChildTabs() {
+  const box = $('#ovChildTabs');
+  const wrap = $('#ovChildWrap');
+  if (!box || !wrap) return;
+  if (!OV.kids.length) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  box.innerHTML = OV.kids.map((c, i) => `
+    <button type="button" class="ft-tab${i === OV.childIdx ? ' on' : ''}" data-ci="${i}"
+      title="${esc(c.title || '')}">${esc(padNum(c.imageNumber || c.index))}</button>`).join('');
+  $$('#ovChildTabs .ft-tab').forEach((b) => {
+    b.onclick = () => {
+      saveChildInputs();
+      OV.childIdx = Number(b.dataset.ci);
+      renderOvChildTabs();
+      loadChildInputs();
+    };
+  });
+}
+
+/** 当前子条目输入框里的内容 → OV.childFields */
+function saveChildInputs() {
+  const c = OV.kids[OV.childIdx];
+  if (!c) return;
+  const fields = OV.childFields.get(c.index) || {};
+  const base = c;
+  for (const [k, sel] of OV_FIELD_INPUTS) {
+    const el = $(sel);
+    if (!el) continue;
+    const v = String(el.value || '').trim();
+    if (!v || v === String(base[k] ?? '')) delete fields[k];
+    else fields[k] = v;
+  }
+  const romEl = $(OV_ROM_SIZE);
+  if (romEl) {
+    const raw = String(romEl.value || '').trim();
+    const bytes = parseSizeInput(raw);
+    if (!raw || Number.isNaN(bytes) || bytes === (Number(base.romSize) || 0)) delete fields.romSize;
+    else fields.romSize = bytes;
+  }
+  if (Object.keys(fields).length) OV.childFields.set(c.index, fields);
+  else OV.childFields.delete(c.index);
+}
+
+/** 把某个子条目的（覆盖后的）值填进输入框 */
+function loadChildInputs() {
+  const c = OV.kids[OV.childIdx];
+  if (!c) return;
+  const ov = OV.childFields.get(c.index) || {};
+  for (const [k, sel] of OV_FIELD_INPUTS) {
+    const el = $(sel);
+    if (el) el.value = ov[k] !== undefined ? ov[k] : (c[k] ?? '');
+  }
+  const romEl = $(OV_ROM_SIZE);
+  if (romEl) romEl.value = ov.romSize !== undefined ? String(ov.romSize) : String(c.romSize || '');
+}
+
+async function openOverrideModal(game) {
+  OV.game = game;
+  OV.entry = null;
+  OV.picked = new Map();
+  OV.files = [];
+  OV.base = {};
+  OV.members = [];
+  OV.kids = [];
+  OV.childFields = new Map();
+  OV.childIdx = 0;
+  let entries = [];
+  let conflicts = [];
+  let bases = {};
+  try {
+    const r = await api(`/libraries/${S.currentId}/overrides`);
+    entries = r.entries || [];
+    conflicts = r.conflicts || [];
+    bases = r.bases || {};
+  } catch (_) {}
+
+  const entry = entries.find((e) => (e.sourceIndexes || []).includes(game.index)) || null;
+  OV.entry = entry;
+  const multi = entry && (entry.sourceIndexes || []).length > 1;
+  $('#ovTitle').textContent = multi ? `编辑合并条目（${entry.sourceIndexes.length} 条合并）` : '编辑条目';
+
+  // 基准 = DAT 里的原始值（有修改记录时取被引用的原始条目），留空/没改就跟随它
+  const base = entry ? (bases[entry.sourceIndexes[0]] || game) : game;
+  OV.base = base;
+  // 总条目：中文名 + 英文名 + 编号（沿用最小的那个）
+  $('#ovName').value = entry ? entry.name : (game.title || '');
+  $('#ovParentComment').value = (entry && entry.fields && entry.fields.comment) || '';
+  const idxs = (entry && entry.sourceIndexes && entry.sourceIndexes.length ? entry.sourceIndexes : [game.index]);
+  $('#ovNum').value = padNum(Math.min(...idxs.map(Number)));
+  $('#ovMatchMode').value = entry ? (entry.matchMode || 'dat') : 'dat';
+
+  // 子条目：有合并记录时用服务端返回的 members（DAT 原始字段）；
+  // 单条目（没合并过）也有一个「子条目」—— 它自己，这样所有字段都能编辑
+  const kidFromGame = (g) => ({
+    index: g.index,
+    imageNumber: g.imageNumber || g.index,
+    title: g.title || '',
+    comment: g.comment || '',
+    publisher: g.publisher || '',
+    sourceRom: g.sourceRom || '',
+    location: g.location || '',
+    language: g.language || '',
+    saveType: g.saveType || '',
+    romSize: g.romSize || 0,
+    files: (g.crcs || []).map((c) => ({
+      crc: (c.crc || '').toUpperCase(),
+      ext: c.extension || '',
+      size: Number(c.size) || g.romSize || 0,
+      label: c.label || '',
+    })),
+  });
+  if (entry) {
+    OV.members = (entry.members || []);
+    for (const idx of entry.sourceIndexes || []) OV.picked.set(Number(idx), true);
+    OV.kids = OV.members.filter((m) => m && m.index != null).map((m) => ({ ...m }));
+    // 没拿到原始字段的子条目（旧数据）退回当前显示值
+    for (const k of OV.kids) {
+      if (k.title === undefined) {
+        const src = S.games.find((x) => x.index === k.index);
+        if (src) Object.assign(k, kidFromGame(src), { index: k.index });
+      }
+    }
+    const saved = new Map((entry.children || []).map((c) => [Number(c.index), c.fields || {}]));
+    for (const k of OV.kids) {
+      const f = saved.get(k.index);
+      if (f && Object.keys(f).length) OV.childFields.set(k.index, { ...f });
+    }
+  } else {
+    OV.kids = [kidFromGame(game)];
+  }
+  OV.kids.sort((a, b) => (a.index || 0) - (b.index || 0));
+
+  const mkFile = (f) => ({
+    ext: f.ext || f.extension || '',
+    size: Number(f.size) || 0,
+    crc: (f.crc || '').toUpperCase(),
+    label: f.label || '',
+    sizeText: f.size ? String(f.size) : '',
+  });
+  OV.files = entry
+    ? (entry.files || []).map(mkFile)
+    : (game.crcs || []).map(mkFile);
+  // 大小兜底：文件行没填大小的，用所属子条目在 DAT 里的大小补上
+  const sizeByCrc = new Map();
+  for (const k of OV.kids) {
+    for (const f of k.files || []) {
+      if (f.size) sizeByCrc.set((f.crc || '').toUpperCase(), f.size);
+    }
+  }
+  for (const f of OV.files) {
+    if (!f.size) {
+      const s = sizeByCrc.get(f.crc)
+        || (OV.kids.length === 1 ? OV.kids[0].romSize : 0);
+      if (s) { f.size = s; f.sizeText = String(s); }
+    }
+  }
+  // 记住每个文件之前设过的标签：取消又重新勾选来源时能恢复
+  OV.labelMemo = {};
+  for (const f of (entry ? entry.files : []) || []) {
+    if (f.crc && f.label) OV.labelMemo[f.crc.toUpperCase()] = f.label;
+  }
+  renderOvFiles();
+
+  OV.childIdx = 0;
+  renderOvChildTabs();
+  loadChildInputs();
+
+  const mine = conflicts.filter((c) => entry && c.id === entry.id);
+  const box = $('#ovConflict');
+  if (mine.length) {
+    box.hidden = false;
+    box.innerHTML = `<b>这个条目和更新后的 DAT 有冲突</b><ul>${mine[0].reasons.map((r) => `<li>${esc(r)}</li>`).join('')}</ul>
+      <div class="desc">可以点「恢复原始」放弃修改，或改完名称后「保存」以保留你的版本。</div>`;
+  } else {
+    box.hidden = true;
+    box.innerHTML = '';
+  }
+
+  $('#ovSearch').value = '';
+  renderOvPick('');
+  $('#ovRevert').hidden = !entry;
+  $('#ovModal').classList.add('show');
+}
+
+async function saveOverride() {
+  const game = OV.game;
+  if (!game) return;
+  const name = $('#ovName').value.trim();
+  const matchMode = $('#ovMatchMode').value;
+  if (!name) { toast('标题不能为空', 'warn'); return; }
+
+  const files = [];
+  for (const f of OV.files) {
+    const bytes = parseSizeInput(f.sizeText);
+    if (Number.isNaN(bytes)) { toast(`大小看不懂：${f.sizeText}`, 'warn'); return; }
+    files.push({
+      ext: String(f.ext || '').trim(),
+      crc: String(f.crc || '').trim().toUpperCase(),
+      size: bytes,
+      label: String(f.label || '').trim(),
+    });
+  }
+
+  // 总条目只存中文名 + 英文名，其余信息都在子条目上
+  const fields = {};
+  const parentComment = $('#ovParentComment').value.trim();
+  if (parentComment) fields.comment = parentComment;
+  // 子条目：把当前输入框的内容收进来，再整体提交改过的那些
+  saveChildInputs();
+  const children = [...OV.childFields.entries()]
+    .filter(([idx]) => (OV.entry ? [...OV.picked.keys()] : [game.index, ...OV.picked.keys()]).map(Number).includes(idx))
+    .map(([index, f]) => ({ index, fields: f }));
+
+  // 已有的合并条目：勾选框就是完整来源（含当前这条）；新条目：当前条目 + 新勾选
+  const indexes = OV.entry
+    ? [...OV.picked.keys()].map(Number)
+    : [game.index, ...OV.picked.keys()].map(Number);
+  if (!indexes.length) { toast('至少要保留一个来源条目', 'warn'); return; }
+
+  try {
+    // 先删旧的再建新的：合并范围可能变了，这样最直观不会留下半截状态
+    if (OV.entry) await api(`/libraries/${S.currentId}/overrides/${OV.entry.id}`, { method: 'DELETE' });
+    await api(`/libraries/${S.currentId}/overrides`, {
+      method: 'POST',
+      body: { indexes, name, matchMode, files, fields, children },
+    });
+    $('#ovModal').classList.remove('show');
+    toast(indexes.length > 1 ? `已合并 ${indexes.length} 个条目，需要重新扫描一次` : '已保存，需要重新扫描一次', 'ok', 6000);
+    await loadState();
+    if (S.currentId) { await loadPending(); await loadGames(); }
+  } catch (e) {
+    toast('保存失败：' + esc(e.message), 'err', 7000);
+  }
+}
+
+async function revertOverride() {
+  if (!OV.entry) return;
+  if (!confirm('恢复成 DAT 原始条目？你的改名/合并都会被丢弃。')) return;
+  try {
+    await api(`/libraries/${S.currentId}/overrides/${OV.entry.id}`, { method: 'DELETE' });
+    $('#ovModal').classList.remove('show');
+    toast('已恢复原始条目，需要重新扫描一次', 'ok', 6000);
+    await loadState();
+    if (S.currentId) { await loadPending(); await loadGames(); }
+  } catch (e) {
+    toast('恢复失败：' + esc(e.message), 'err', 7000);
+  }
 }
 
 /** 异步加载该游戏的所有图片并渲染切换器 */
@@ -1223,7 +1827,17 @@ async function loadDetailImages(index) {
   } catch (_) {}
   S.dtSlots = slots;
   S.dtIdx = 0;
+  S.dtVideo = false; // 换游戏/换页签回到图片，避免上一条的播放器还挂着
   renderDetailImage();
+}
+
+/** 从一串链接里找第一个 B 站视频（BV 号固定 12 位：BV + 10 位字母数字） */
+function bvOf(links) {
+  for (const u of links || []) {
+    const m = String(u || '').match(/BV[0-9A-Za-z]{10}/);
+    if (m) return { bvid: m[0], url: u };
+  }
+  return null;
 }
 
 function renderDetailImage() {
@@ -1232,6 +1846,14 @@ function renderDetailImage() {
   const cover = $('#detailCover');
   const thumbs = $('#detailThumbs');
   if (!cover || !g) return;
+  // 退出视频模式时清掉 B 站播放器的 postMessage 监听与估算计时器，避免泄漏与串台
+  if (!S.dtVideo) {
+    if (S.dtVideoMsgHandler) {
+      if (typeof window !== 'undefined') window.removeEventListener('message', S.dtVideoMsgHandler);
+      S.dtVideoMsgHandler = null;
+    }
+    if (S.dtVideoTimer) { clearInterval(S.dtVideoTimer); S.dtVideoTimer = null; }
+  }
 
   // 末尾固定一个"+"占位，点击上传；没有截图时它就是唯一一项
   const addThumb = `
@@ -1240,16 +1862,73 @@ function renderDetailImage() {
       <span>添加</span>
     </div>`;
 
+  // 合并条目：截图按当前子条目的原编号取（各有各的封面）
+  const coverIdx = S.dtCoverIdx != null ? S.dtCoverIdx : (g.index);
+  // 站点链接里若有 B 站视频，缩略图栏多一个「视频」入口，点开大图直接内嵌播放
+  const siteRaw = S.sites[coverIdx] || S.sites[g.index] || null;
+  const bv = bvOf(siteRaw && siteRaw.links);
+  const videoThumb = bv ? `
+    <div class="dt-thumb video${S.dtVideo ? ' on' : ''}" id="dtVideoThumb" title="播放发布视频（B 站）">
+      <div class="vwrap">
+        <span class="play"></span>
+        <img class="vthumb" src="/api/bili/cover/${encodeURIComponent(bv.bvid)}" alt="">
+      </div>
+      <span>视频</span>
+    </div>` : '';
+
+  // —— 视频模式：整个大图区换成 B 站播放器 ——
+  // 注意：不要加 sandbox —— 沙箱会把播放器的 UI 脚本拦掉，控制栏/进度条出不来。
+  // iframe 跨域本身已隔离，用标准 allow 授权自动播放与全屏即可。
+  if (S.dtVideo && bv) {
+    cover.classList.add('video-mode');
+    cover.innerHTML = `
+      <div class="dt-video-wrap">
+        <iframe class="dt-video" id="dtVideoIframe" src="https://player.bilibili.com/player.html?bvid=${encodeURIComponent(bv.bvid)}&autoplay=1&danmaku=0&high_quality=1"
+          scrolling="no" frameborder="0" allowfullscreen="true"
+          allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+          referrerpolicy="no-referrer-when-downgrade" title="发布视频"></iframe>
+      </div>
+      <div class="dt-video-ctrl">
+        <button class="dt-vbtn" id="dtVPlay" type="button" title="播放 / 暂停">⏸</button>
+        <div class="dt-progress" id="dtProgress" title="点击定位进度">
+          <div class="dt-progress-buf" id="dtPBuf"></div>
+          <div class="dt-progress-play" id="dtPPlay"></div>
+        </div>
+        <span class="dt-vtime" id="dtVTime">0:00 / 0:00</span>
+        <button class="dt-vbtn" id="dtVMute" type="button" title="静音 / 取消静音">🔊</button>
+      </div>
+      <span class="badge-src">B 站视频</span>`;
+    if (thumbs) {
+      thumbs.innerHTML = slots.map((s, i) => `
+        <div class="dt-thumb" data-i="${i}">
+          <img src="/api/cover/${S.currentId}/${coverIdx}?slot=${s.slot}&v=${S.coverStamp}" alt="">
+          <span>${esc(s.label)}</span>
+        </div>`).join('') + videoThumb + addThumb;
+    }
+    bindVideoThumb(bv);
+    bindVideoBar(bv.bvid);
+    if (thumbs) {
+      $$('.dt-thumb[data-i]', thumbs).forEach((el) => {
+        el.onclick = () => { S.dtIdx = parseInt(el.dataset.i, 10); S.dtVideo = false; renderDetailImage(); };
+      });
+      const add = $('#dtAddThumb');
+      if (add) add.onclick = () => openCover(coverIdx, 'a');
+    }
+    return;
+  }
+  cover.classList.remove('video-mode');
+
   if (!slots.length) {
     cover.innerHTML = '<div class="empty">暂无截图<br><span style="font-size:11px">点击下方的 + 上传，或在设置里指定图片目录</span></div>';
-    if (thumbs) thumbs.innerHTML = addThumb;
+    if (thumbs) thumbs.innerHTML = videoThumb + addThumb;
     const add = $('#dtAddThumb');
-    if (add) add.onclick = () => openCover(g.index, 'a');
+    if (add) add.onclick = () => openCover(coverIdx, 'a');
+    bindVideoThumb(bv);
     return;
   }
 
   const cur = slots[S.dtIdx];
-  const url = `/api/cover/${S.currentId}/${g.index}?slot=${cur.slot}&v=${S.coverStamp}`;
+  const url = `/api/cover/${S.currentId}/${coverIdx}?slot=${cur.slot}&v=${S.coverStamp}`;
   const multi = slots.length > 1;
   cover.innerHTML = `
     <img src="${url}" alt="" id="dtBigImg" title="点击查看大图">
@@ -1259,13 +1938,13 @@ function renderDetailImage() {
   if (thumbs) {
     thumbs.innerHTML = slots.map((s, i) => `
       <div class="dt-thumb ${i === S.dtIdx ? 'on' : ''}" data-i="${i}">
-        <img src="/api/cover/${S.currentId}/${g.index}?slot=${s.slot}&v=${S.coverStamp}" alt="">
+        <img src="/api/cover/${S.currentId}/${coverIdx}?slot=${s.slot}&v=${S.coverStamp}" alt="">
         <span>${esc(s.label)}</span>
-      </div>`).join('') + addThumb;
+      </div>`).join('') + videoThumb + addThumb;
   }
 
   const bigImg = $('#dtBigImg');
-  if (bigImg) bigImg.onclick = () => openCover(g.index, cur.slot);
+  if (bigImg) bigImg.onclick = () => openCover(coverIdx, cur.slot);
   const prev = $('#dtPrev');
   const next = $('#dtNext');
   const go = (d) => { S.dtIdx = (S.dtIdx + d + slots.length) % slots.length; renderDetailImage(); };
@@ -1273,10 +1952,136 @@ function renderDetailImage() {
   if (next) next.onclick = () => go(1);
   if (thumbs) {
     $$('.dt-thumb[data-i]', thumbs).forEach((el) => {
-      el.onclick = () => { S.dtIdx = parseInt(el.dataset.i, 10); renderDetailImage(); };
+      el.onclick = () => { S.dtIdx = parseInt(el.dataset.i, 10); S.dtVideo = false; renderDetailImage(); };
     });
     const add = $('#dtAddThumb');
-    if (add) add.onclick = () => openCover(g.index, 'a');
+    if (add) add.onclick = () => openCover(coverIdx, 'a');
+    bindVideoThumb(bv);
+  }
+}
+
+/** 缩略图栏的「视频」入口：点了就把大图区换成播放器并自动开播 */
+function bindVideoThumb(bv) {
+  const el = $('#dtVideoThumb');
+  if (!el || !bv) return;
+  el.onclick = () => { S.dtVideo = true; renderDetailImage(); };
+  // 封面图走本机代理（B 站 CDN 防盗链）；拿不到就隐藏 img，露出下面的播放三角
+  const img = el.querySelector('.vthumb');
+  if (img) img.onerror = () => { img.style.display = 'none'; };
+}
+
+/**
+ * B 站嵌入式播放器自带的进度条只在鼠标悬停时浮现，且不保证一定回传连续进度，
+ * 这里在播放器下方叠一条**始终可见**的进度条 + 时间。
+ *
+ * 进度来源（双层保险）：
+ *  1) 优先用 B 站播放器经 postMessage 回传的 timeupdate / video_progress（如有）；
+ *  2) 拿不到连续进度时，用真实时长（服务端代理 B 站接口取得）做"估算进度条"——
+ *     播放中每秒 +1，照样是一条在走的进度条，满足"能看到播放进度"的需求。
+ *
+ * 进度条可点击定位、播放/暂停/静音按钮：向 iframe 发 postMessage 指令（best-effort）；
+ * 原生 hover 控制栏仍可用，二者并存。
+ */
+function bindVideoBar(bvid) {
+  const iframe = $('#dtVideoIframe');
+  if (!iframe) return;
+  const playBtn = $('#dtVPlay');
+  const muteBtn = $('#dtVMute');
+  const progress = $('#dtProgress');
+  const pPlay = $('#dtPPlay');
+  const pBuf = $('#dtPBuf');
+  const vTime = $('#dtVTime');
+
+  // 先清掉上一次的监听与计时器，避免换游戏 / 退出视频后还收着旧消息
+  if (S.dtVideoMsgHandler) {
+    if (typeof window !== 'undefined') window.removeEventListener('message', S.dtVideoMsgHandler);
+    S.dtVideoMsgHandler = null;
+  }
+  if (S.dtVideoTimer) { clearInterval(S.dtVideoTimer); S.dtVideoTimer = null; }
+  S.dtVideoCur = 0; S.dtVideoDur = 0; S.dtVideoPlaying = true; S.dtVideoMuted = false;
+
+  const fmt = (s) => {
+    s = Math.max(0, Math.floor(Number(s) || 0));
+    const m = Math.floor(s / 60);
+    const ss = String(s % 60).padStart(2, '0');
+    return m + ':' + ss;
+  };
+  const paint = () => {
+    const pct = S.dtVideoDur ? Math.min(100, (S.dtVideoCur / S.dtVideoDur) * 100) : 0;
+    if (pPlay) pPlay.style.width = pct + '%';
+    if (vTime) vTime.textContent = fmt(S.dtVideoCur) + ' / ' + fmt(S.dtVideoDur);
+  };
+  const setPlaying = (p) => {
+    S.dtVideoPlaying = p;
+    if (playBtn) playBtn.textContent = p ? '⏸' : '▶';
+  };
+  // 真实时长到手后开启"估算计时器"：播放中每秒推进一秒（被真实 timeupdate 覆盖）
+  const ensureTimer = () => {
+    if (S.dtVideoTimer) clearInterval(S.dtVideoTimer);
+    S.dtVideoTimer = setInterval(() => {
+      if (!S.dtVideoPlaying || !S.dtVideoDur) return;
+      if (S.dtVideoCur < S.dtVideoDur) { S.dtVideoCur = Math.min(S.dtVideoDur, S.dtVideoCur + 1); paint(); }
+    }, 1000);
+  };
+
+  // B 站播放器回传的消息：可能是对象，也可能是 JSON 字符串；
+  // 事件名不统一（timeupdate / video_progress / playing），这里都接住，
+  // 并从多种字段名里取 currentTime / duration。
+  const handler = (e) => {
+    if (iframe.contentWindow && e.source !== iframe.contentWindow) return;
+    let d;
+    try { d = typeof e.data === 'string' ? JSON.parse(e.data) : e.data; } catch (_) { return; }
+    if (!d || typeof d !== 'object') return;
+    const ev = d.event || d.type || '';
+    const cur = d.currentTime != null ? d.currentTime : d.time;
+    const dur = d.duration != null ? d.duration : d.total;
+    if (cur != null) {
+      S.dtVideoCur = Number(cur);
+      if (dur != null) S.dtVideoDur = Number(dur);
+      if (d.buffered != null && S.dtVideoDur) {
+        const bp = Math.min(100, (Number(d.buffered) / S.dtVideoDur) * 100);
+        if (pBuf) pBuf.style.width = bp + '%';
+      }
+      paint();
+    } else if (dur != null) {
+      S.dtVideoDur = Number(dur); paint();
+    }
+    if (ev === 'play' || ev === 'playing') setPlaying(true);
+    else if (ev === 'pause' || ev === 'paused') setPlaying(false);
+    else if (ev === 'ended') { setPlaying(false); S.dtVideoCur = S.dtVideoDur; paint(); }
+  };
+  S.dtVideoMsgHandler = handler;
+  if (typeof window !== 'undefined') window.addEventListener('message', handler);
+
+  // 真实时长：服务端代理 B 站接口（前端直连会被 CORS / 防盗链拦），拿到后开估算计时器
+  if (typeof fetch === 'function' && typeof window !== 'undefined' && bvid) {
+    fetch('/api/bili/info/' + encodeURIComponent(bvid)).then((r) => r.json()).then((d) => {
+      if (d && d.duration) { S.dtVideoDur = Number(d.duration); paint(); if (S.dtVideoPlaying) ensureTimer(); }
+    }).catch(() => {});
+  }
+
+  if (progress) {
+    progress.onclick = (e) => {
+      const rect = progress.getBoundingClientRect();
+      const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+      const t = ratio * (S.dtVideoDur || 0);
+      S.dtVideoCur = t; paint();
+      try { iframe.contentWindow.postMessage(JSON.stringify({ type: 'seek', data: t }), 'https://player.bilibili.com'); } catch (_) {}
+    };
+  }
+  if (playBtn) {
+    playBtn.onclick = () => {
+      const next = !S.dtVideoPlaying;
+      setPlaying(next);
+      try { iframe.contentWindow.postMessage(JSON.stringify({ type: next ? 'play' : 'pause' }), 'https://player.bilibili.com'); } catch (_) {}
+    };
+  }
+  if (muteBtn) {
+    muteBtn.onclick = () => {
+      S.dtVideoMuted = !S.dtVideoMuted;
+      muteBtn.textContent = S.dtVideoMuted ? '🔇' : '🔊';
+      try { iframe.contentWindow.postMessage(JSON.stringify({ type: S.dtVideoMuted ? 'mute' : 'unmute' }), 'https://player.bilibili.com'); } catch (_) {}
+    };
   }
 }
 
@@ -1652,7 +2457,7 @@ function trackTask(task) {
 }
 
 function taskLabel(kind) {
-  return { scan: '扫描', organize: '整理', update: '更新 DAT', covers: '下载截图', classify: '自动归类' }[kind] || kind;
+  return { scan: '扫描', organize: '整理', update: '更新 DAT', covers: '下载截图', classify: '自动归类', site: '站点数据' }[kind] || kind;
 }
 
 
@@ -1842,6 +2647,19 @@ function onTask(t) {
     }
     S.coverStamp++;
     loadCovers(true).then(() => applyFilter());
+  } else if (t.kind === 'site') {
+    const r = t.result || {};
+    const parts = [];
+    parts.push(`${r.matched || 0}/${r.games || 0} 条匹配到`);
+    parts.push(`${r.withLink || 0} 条有发布链接`);
+    parts.push(`${r.withComment || 0} 条有发布说明`);
+    toast(esc(`站点数据已同步（${r.consoleType || ''}）：` + parts.join('，')), 'ok', 5500);
+    if (t.libraryId === S.currentId) {
+      loadSiteInfo().then(() => loadGames()).then(() => {
+        // 详情面板是常驻的，站点信息要跟着刷新一次
+        if (S.detailGame) openDetail(S.detailGame.index);
+      });
+    }
   }
 }
 
@@ -2034,6 +2852,7 @@ function renderDrawer(lib) {
         <option value="both" ${d.matchMode === 'both' ? 'selected' : ''}>CRC 优先，失败再用文件名（推荐）</option>
         <option value="crc" ${d.matchMode === 'crc' ? 'selected' : ''}>仅 CRC（最严格）</option>
         <option value="name" ${d.matchMode === 'name' ? 'selected' : ''}>仅文件名（最快，可能误判）</option>
+        <option value="name-size" ${d.matchMode === 'name-size' ? 'selected' : ''}>文件名 + 大小完全一致（较严，命中率取决于文件是否被改过名）</option>
       </select>
       <div class="desc">zip 内的 CRC 直接读目录，无需解压；裸文件需要完整读一遍，大文件首次扫描较慢，之后走缓存。</div>
     </div>
@@ -2588,10 +3407,174 @@ function closePrompt(v) {
   if (promptResolve) { promptResolve(v); promptResolve = null; }
 }
 
+/* ------------------------------------------------------------------ 新建清单（CSV / 文件夹） */
+function openNewLib() {
+  $('#nlName').value = '';
+  $('#nlSystem').value = '';
+  $('#nlFolder').value = '';
+  $('#nlCsvFile').value = '';
+  $('#nlRecursive').checked = false;
+  $('#nlFolderGames').checked = false;
+  const box = $('#nlResult');
+  box.hidden = true; box.innerHTML = '';
+  $('#newLibModal').classList.add('show');
+}
+
+async function createNewLib() {
+  const name = $('#nlName').value.trim();
+  const system = $('#nlSystem').value.trim();
+  const csvFiles = [...$('#nlCsvFile').files];
+  const folder = $('#nlFolder').value.trim();
+  const box = $('#nlResult');
+  if (!csvFiles.length && !folder) { toast('选一个 CSV 文件，或填一个服务器文件夹路径', 'warn'); return; }
+  if (csvFiles.length && folder) { toast('两种方式选一种：要么 CSV，要么文件夹', 'warn'); return; }
+  try {
+    $('#nlCreate').disabled = true;
+    let r;
+    if (csvFiles.length) {
+      // 多份 CSV 一起导：含「相对路径」列的整份算一个游戏（游戏名 = CSV 文件名）
+      const csvs = [];
+      for (const f of csvFiles) {
+        csvs.push({ name: f.name.replace(/\.[^.]+$/, ''), text: await f.text() });
+      }
+      r = await api('/libraries/from-csv', {
+        method: 'POST',
+        body: { name: name || (csvs.length === 1 ? csvs[0].name : ''), system, csvs },
+      });
+    } else {
+      // 库名默认取文件夹名（服务端兜底）
+      r = await api('/libraries/from-folder', {
+        method: 'POST',
+        body: {
+          name, system, folder,
+          recursive: $('#nlRecursive').checked,
+          mode: $('#nlFolderGames').checked ? 'games' : 'files',
+        },
+      });
+    }
+    const libName = r.library && r.library.name ? r.library.name : '新清单';
+    const notes = [].concat(r.errors || [], r.warnings || []);
+    $('#newLibModal').classList.remove('show');
+    if (r.skipped) {
+      toast(`清单「${esc(libName)}」已存在且版本不更高，未重复创建`, 'warn', 7000);
+    } else {
+      toast(`已创建清单「${esc(libName)}」：${(r.stats && r.stats.total) || 0} 条` +
+        (notes.length ? `，有 ${notes.length} 条提示（见列表页扫描日志）` : ''), 'ok', 7000);
+    }
+    await loadState();
+    if (r.library && r.library.id) await selectLib(r.library.id);
+  } catch (e) {
+    box.hidden = false;
+    box.innerHTML = '<b>创建失败</b>' + esc(e.message || '');
+  } finally {
+    $('#nlCreate').disabled = false;
+  }
+}
+
+/* ------------------------------------------------------------------ 手动新增条目（覆盖层，不改原 DAT） */
+function openAddEntry() {
+  if (!S.currentId) { toast('先在左侧选择一个清单', 'warn'); return; }
+  for (const id of ['aeName', 'aeFile', 'aeSize', 'aeCrc', 'aeComment', 'aePublisher', 'aeLocation']) {
+    $('#' + id).value = '';
+  }
+  $('#aeMatch').value = 'name-size';
+  $('#addEntryModal').classList.add('show');
+  $('#aeName').focus();
+}
+
+async function saveNewEntry() {
+  const name = $('#aeName').value.trim();
+  const file = $('#aeFile').value.trim();
+  if (!name) { toast('名称不能为空', 'warn'); return; }
+  if (!file) { toast('文件名不能为空（扫描按它匹配）', 'warn'); return; }
+  const sizeText = $('#aeSize').value.trim();
+  const size = sizeText ? parseSizeInput(sizeText) : 0;
+  if (Number.isNaN(size)) { toast('大小看不懂：' + esc(sizeText) + '（示例：734003200 或 700M）', 'warn'); return; }
+  const dot = file.lastIndexOf('.');
+  const ext = dot > 0 ? file.slice(dot).toLowerCase() : '';
+  const fields = {};
+  if ($('#aeComment').value.trim()) fields.comment = $('#aeComment').value.trim();
+  if ($('#aePublisher').value.trim()) fields.publisher = $('#aePublisher').value.trim();
+  if ($('#aeLocation').value.trim()) fields.location = $('#aeLocation').value.trim();
+  try {
+    await api(`/libraries/${S.currentId}/overrides`, {
+      method: 'POST',
+      body: {
+        standalone: true,
+        name,
+        matchMode: $('#aeMatch').value,
+        files: [{ ext, size, crc: $('#aeCrc').value.trim().toUpperCase(), label: '' }],
+        fields,
+      },
+    });
+    $('#addEntryModal').classList.remove('show');
+    toast('已新增条目，重新扫描一次即可生效', 'ok', 6000);
+    await loadState();
+    if (S.currentId) { await loadPending(); await loadGames(); }
+  } catch (e) {
+    toast('新增失败：' + esc(e.message), 'err', 7000);
+  }
+}
+
+/** 导出当前清单为 CSV（下载），用于批量改元数据后回导 */
+async function exportCsv() {
+  if (!S.currentId) return;
+  const lib = S.libs.find((l) => l.id === S.currentId);
+  const name = (lib && lib.name) || 'dat';
+  // 直接走浏览器下载（带 BOM，Excel 打开不乱码）
+  const a = document.createElement('a');
+  a.href = `/api/libraries/${S.currentId}/dat-export.csv`;
+  a.download = (name.replace(/[^\w一-龥-]/g, '_') || 'dat') + '.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  toast('已开始下载 CSV（含当前所有条目与元数据）', 'ok', 5000);
+}
+
+/** 导入 CSV：先预览会改动多少条，确认后再回导 */
+async function importCsvFile(file) {
+  if (!file) return;
+  if (!S.currentId) { toast('先选一个清单', 'warn'); return; }
+  let text;
+  try { text = await file.text(); } catch (e) { toast('读文件失败：' + esc(e.message), 'err'); return; }
+  if (!text.trim()) { toast('CSV 是空的', 'warn'); return; }
+  $('#btnImportCsv').disabled = true;
+  try {
+    const r = await api(`/libraries/${S.currentId}/import-csv`, { method: 'POST', body: { csv: text } });
+    const parts = [];
+    if (r.updated) parts.push(`更新 <b>${r.updated}</b> 条`);
+    if (r.added) parts.push(`新增 <b>${r.added}</b> 条`);
+    if (r.skipped) parts.push(`跳过 <b>${r.skipped}</b> 行`);
+    let msg = '导入完成：' + (parts.join('，') || '无变化');
+    if ((r.skippedRows || []).length) {
+      msg += `<br><span class="muted">${esc((r.skippedRows || []).slice(0, 5).join('；'))}${(r.skippedRows.length > 5) ? ' …' : ''}</span>`;
+    }
+    toast(msg, r.skipped ? 'warn' : 'ok', 8000);
+    await loadState();
+    if (S.currentId) { await loadGames(); }
+  } catch (e) {
+    toast('导入失败：' + esc(e.message || e), 'err', 8000);
+  } finally {
+    $('#btnImportCsv').disabled = false;
+  }
+}
+
 /* ------------------------------------------------------------------ 事件绑定 */
 function bind() {
   $('#btnAddDat').onclick = () => $('#filePicker').click();
   $('#filePicker').onchange = (e) => { importFiles(e.target.files); e.target.value = ''; };
+  // 新建清单（CSV / 文件夹）与手动新增条目
+  $('#btnNewLib').onclick = openNewLib;
+  $('#nlClose').onclick = $('#nlCancel').onclick = () => $('#newLibModal').classList.remove('show');
+  $('#nlCreate').onclick = createNewLib;
+  $('#btnAddEntry').onclick = openAddEntry;
+  $('#aeClose').onclick = $('#aeCancel').onclick = () => $('#addEntryModal').classList.remove('show');
+  $('#aeSave').onclick = saveNewEntry;
+
+  // DAT 导入导出 CSV（批量改元数据）
+  $('#btnExportCsv').onclick = exportCsv;
+  $('#btnImportCsv').onclick = () => $('#csvImportFile').click();
+  $('#csvImportFile').onchange = (e) => { importCsvFile(e.target.files[0]); e.target.value = ''; };
 
   // 只有存在时才绑定（老页面结构兼容）
   const bindIf = (sel, fn) => { const el = $(sel); if (el) el.onclick = fn; };
@@ -2669,6 +3652,11 @@ function bind() {
 
   $('#btnCloseDrawer').onclick = closeDrawer;
   $('#btnCancelSettings').onclick = closeDrawer;
+  $('#ovClose').onclick = () => $('#ovModal').classList.remove('show');
+  $('#ovCancel').onclick = () => $('#ovModal').classList.remove('show');
+  $('#ovSave').onclick = saveOverride;
+  $('#ovRevert').onclick = revertOverride;
+  $('#ovSearch').oninput = (e) => renderOvPick(e.target.value);
   $('#btnSaveSettings').onclick = saveSettings;
   $('#btnDeleteLib').onclick = deleteLib;
   $('#scrim').onclick = () => closeDrawer();

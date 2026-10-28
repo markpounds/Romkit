@@ -10,6 +10,7 @@ node_modules/
 data/config.json
 data/dats/
 data/covers/
+data/overrides/
 data/icons/
 data/cache/
 data/logs/

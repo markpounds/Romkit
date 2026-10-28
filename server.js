@@ -14,20 +14,23 @@ const crypto = require('node:crypto');
 const { URL } = require('node:url');
 
 const store = require('./lib/store');
-const { loadDatFile, parseDatXml } = require('./lib/dat');
+const { loadDatFile, parseDatXml, normalizeKey } = require('./lib/dat');
 const { scanLibrary, crcKey } = require('./lib/scanner');
 const { crc32FileHex } = require('./lib/crc32');
 const { buildPlan, executePlan, buildClassifyPlan, sanitize } = require('./lib/organizer');
 const { checkUpdate, downloadDat } = require('./lib/updater');
 const covers = require('./lib/covers');
 const naming = require('./lib/naming');
+const overrides = require('./lib/overrides');
+const emugif = require('./lib/emugif');
+const csvdat = require('./lib/csvdat');
 
 const WEB_DIR = path.join(__dirname, 'web');
 /** 单文件发行版支持：构建脚本会把 web/ 内嵌为 globalThis.__ROMKIT_WEB__（rel -> Buffer） */
 const WEB_EMBED = (typeof globalThis !== 'undefined' && globalThis.__ROMKIT_WEB__) || null;
 /** 监听地址：默认仅本机（安全）；NAS 等场景可用 ROMKIT_HOST=0.0.0.0 开放局域网 */
 const HOST = process.env.ROMKIT_HOST || '127.0.0.1';
-const VERSION = '2.15.15';
+const VERSION = '2.20.0';
 // 进程 umask：飞牛/NAS 等服务环境下可能默认 077，会让 ROMKit 整理出来的
 // 文件（0600）和目录（0700）对同机其他用户（含 SMB 共享）完全不可读，
 // 表现为「整理完就打不开 / 扫描时报权限不足」。这里统一放宽到 022。
@@ -37,7 +40,9 @@ if (process.platform !== 'win32' && typeof process.umask === 'function') {
 const PORT_START = Number(process.env.ROMKIT_PORT || 8765);
 
 // ---------------------------------------------------------------- 运行时状态
-const runtime = new Map(); // libId -> { dat, scan }
+const runtime = new Map(); // libId -> { dat, rawDat, scan, conflicts }
+overrides.setDataDirGetter(() => store.DATA_DIR);
+emugif.setDataDirGetter(() => store.DATA_DIR);
 const tasks = new Map();
 const sseClients = new Set();
 
@@ -248,16 +253,97 @@ function summarize(lib) {
   };
 }
 
+/**
+ * 把覆盖层套到原始 DAT 上，得到参与扫描/整理的条目表。
+ * 注意 rt.dat 是**套用后**的，rt.rawDat 保留原始 —— 在线更新时比对指纹、
+ * 判断"内容有没有变"必须用原始的，否则永远判成变了。
+ */
+async function applyOverrides(libId, rawDat) {
+  try {
+    const book = await overrides.load(libId);
+    return overrides.apply(rawDat, book);
+  } catch (e) {
+    return { dat: rawDat, conflicts: [] };
+  }
+}
+
+/** 归一化子条目修改：只保留有 index 且字段非空的 */
+function normalizeChildren(raw) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const c of raw) {
+    const idx = Number(c && c.index);
+    if (!Number.isFinite(idx)) continue;
+    const fields = overrides.normalizeFields(c && c.fields);
+    if (!Object.keys(fields).length) continue;
+    out.push({ index: idx, fields });
+  }
+  return out;
+}
+
+/**
+ * 按 index 找游戏；找不到时落到合并条目的子条目上。
+ * 子条目的原编号已被合并「吃掉」，不在 games 列表里，
+ * 但它们的封面/截图是按各自编号存的，必须能找到。
+ */
+function findGameOrChild(rt, index) {
+  const games = (rt.dat && rt.dat.games) || [];
+  const hit = games.find((g) => g.index === index);
+  if (hit) return hit;
+  for (const g of games) {
+    const kid = (g.children || []).find((c) => c.index === index);
+    if (kid) return { ...kid, children: undefined };
+  }
+  return null;
+}
+
+/* ---------------------------------------------------------------------------
+ * 站点数据（dat.emugif.com 的发布链接 + 发布说明）
+ *
+ * DAT 里没有这两个字段，只能从站点接口取。做法是：认出 DAT 的机种号
+ * （datVersionURL 里的 ?ver=ps2），整表拉一次，按 ROM 的 CRC 建索引，
+ * 之后取哪条都是内存查表。缓存按机种复用 —— 同一机种多个库只拉一次。
+ * ------------------------------------------------------------------------ */
+const siteCache = new Map(); // consoleType -> { payload, index, at }
+
+async function siteIndexOf(dat, { allowFetch = false } = {}) {
+  if (!dat) return null;
+  const ct = emugif.consoleTypeOf(dat);
+  if (!ct) return null;
+  let e = siteCache.get(ct);
+  if (e && allowFetch && Date.now() - e.at > emugif.TTL_MS) e = null;
+  if (!e) {
+    let payload = await emugif.readCache(ct);
+    if (!payload && allowFetch) {
+      try {
+        payload = await emugif.fetchConsole(ct, true);
+      } catch (err) {
+        return { consoleType: ct, error: err.message };
+      }
+    }
+    if (!payload) return { consoleType: ct, error: null, empty: true };
+    e = { payload, index: emugif.buildIndex(payload), at: payload.fetchedAt || Date.now() };
+    siteCache.set(ct, e);
+  }
+  return { consoleType: ct, payload: e.payload, index: e.index };
+}
+
 async function hydrateLibrary(lib, forceReload = false) {
   if (runtime.has(lib.id) && !forceReload) return runtime.get(lib.id);
   const rt = { dat: null, scan: null, error: null };
   try {
     const { dat } = await loadDatFile(lib.datPath);
-    rt.dat = dat;
+    const applied = await applyOverrides(lib.id, dat);
+    rt.rawDat = dat;
+    rt.dat = applied.dat;
+    rt.conflicts = applied.conflicts || [];
     lib.name = lib.name || dat.datName;
     lib.datVersion = dat.datVersion;
     lib.system = dat.system;
     lib.extensions = dat.extensions;
+    // 文件夹型清单（每个游戏是一个目录、由一堆文件构成，如 PSV 已安装游戏）：
+    // 没有单一「文件类型」，顶部「格式」栏显示「文件夹」而不是把所有扩展名铺开
+    lib.folderType = dat.games.length > 0 && dat.games.every((g) => g.multiFile);
     lib.imFolder = dat.imFolder;
     lib.romTitle = dat.romTitle;
     lib.datName = dat.datName;
@@ -323,6 +409,15 @@ function cmpVersion(a, b) {
   return 0;
 }
 
+/** 自建条目的独立编号（覆盖层里不引用原条目时用；900000 起，避开 DAT 正常编号区间） */
+function nextStandaloneIndex(book) {
+  let max = 900000;
+  for (const e of (book && book.entries) || []) {
+    if (!(e.sourceIndexes || []).length && Number(e.baseIndex) > max) max = Number(e.baseIndex);
+  }
+  return max + 1;
+}
+
 /**
  * 注册 DAT。
  * 如果已存在**名字完全相同**的 DAT，就比较版本号：
@@ -364,7 +459,11 @@ async function registerDat({ buffer, fileName, sourceLabel, origin }) {
     dup.datConfig = { newDat: dat.newDat, romTitle: dat.romTitle };
     dup.updatedAt = new Date().toISOString();
     dup.error = null;
-    runtime.set(dup.id, { dat, scan: null, error: null }); // 版本变了，旧扫描结果作废
+    {
+      const ap = await applyOverrides(dup.id, dat);
+      // 版本变了，旧扫描结果作废；覆盖层重新套一遍
+      runtime.set(dup.id, { dat: ap.dat, rawDat: dat, conflicts: ap.conflicts, scan: null, error: null });
+    }
     await store.save();
     return { library: dup, replaced: true, oldVersion: before };
   }
@@ -389,7 +488,10 @@ async function registerDat({ buffer, fileName, sourceLabel, origin }) {
     error: null,
   };
   store.addLibrary(lib);
-  runtime.set(id, { dat, scan: null, error: null });
+  {
+    const ap = await applyOverrides(id, dat);
+    runtime.set(id, { dat: ap.dat, rawDat: dat, conflicts: ap.conflicts, scan: null, error: null });
+  }
   await store.save();
   return { library: lib };
 }
@@ -537,7 +639,7 @@ async function handleApi(req, res, url) {
     const lib = store.getLibrary(mcovl[1]);
     if (!lib) return json(res, 404, { error: '库不存在' });
     const rt = await hydrateLibrary(lib);
-    const game = rt.dat && rt.dat.games.find((g) => g.index === parseInt(mcovl[2], 10));
+    const game = findGameOrChild(rt, parseInt(mcovl[2], 10));
     if (!game) return json(res, 404, { error: '游戏不存在' });
     const slots = await covers.listSlots(lib, game);
     return json(res, 200, {
@@ -553,7 +655,7 @@ async function handleApi(req, res, url) {
     if (!lib) return json(res, 404, { error: '库不存在' });
     const rt = await hydrateLibrary(lib);
     const index = parseInt(mcov[2], 10);
-    const game = rt.dat && rt.dat.games.find((g) => g.index === index);
+    const game = findGameOrChild(rt, index);
     if (!game) return json(res, 404, { error: '游戏不存在' });
 
     if (method === 'GET') {
@@ -586,6 +688,49 @@ async function handleApi(req, res, url) {
     if (method === 'DELETE') {
       const removed = await covers.removeCover(lib, game);
       return json(res, 200, { ok: true, removed });
+    }
+  }
+
+  // ---------- B 站视频封面代理：/api/bili/cover/:bvid
+  // B 站图片 CDN 有防盗链，前端 <img> 直连会被 403，必须由本机中转。
+  // 抓下来按 BV 号缓存到磁盘，第二次直接回文件。
+  const mbili = p.match(/^\/bili\/cover\/(BV[0-9A-Za-z]{10})$/);
+  if (mbili && method === 'GET') {
+    const bvid = mbili[1];
+    const dir = path.join(store.DATA_DIR, 'cache', 'emugif', 'bv');
+    const file = path.join(dir, bvid + '.bin');
+    let buf = null;
+    try {
+      const st = await fsp.stat(file);
+      if (st.isFile() && st.size > 0) buf = await fsp.readFile(file);
+    } catch (_) {}
+    if (!buf) {
+      try {
+        buf = await emugif.fetchBiliCover(bvid);
+        await fsp.mkdir(dir, { recursive: true });
+        await fsp.writeFile(file, buf).catch(() => {});
+      } catch (e) {
+        return json(res, 404, { error: '拿不到 B 站封面：' + e.message });
+      }
+    }
+    res.writeHead(200, {
+      'Content-Type': emugif.sniffImg(buf) || 'image/jpeg',
+      'Content-Length': buf.length,
+      'Cache-Control': 'max-age=604800',
+    });
+    return res.end(buf);
+  }
+
+  // ---------- B 站视频信息（时长等）：/api/bili/info/:bvid
+  // 嵌入式播放器不回传连续进度，前端用真实时长做估算进度条。
+  const mbinfo = p.match(/^\/bili\/info\/(BV[0-9A-Za-z]{10})$/);
+  if (mbinfo && method === 'GET') {
+    const bvid = mbinfo[1];
+    try {
+      const info = await emugif.fetchBiliInfo(bvid);
+      return json(res, 200, { duration: info.duration, bvid });
+    } catch (e) {
+      return json(res, 502, { error: '拿不到 B 站视频信息：' + e.message });
     }
   }
 
@@ -747,6 +892,131 @@ async function handleApi(req, res, url) {
     return json(res, 200, { library: summarize(r.library), skipped: !!r.skipped, replaced: !!r.replaced, existingVersion: r.existingVersion || '', oldVersion: r.oldVersion || '' });
   }
 
+  // ---------- CSV 模板下载（自带 BOM，Excel 直接打开不乱码）
+  if (p === '/csv-template' && method === 'GET') {
+    const body = Buffer.from('\ufeff' + csvdat.templateCsv(q.get('mode') === 'multi' ? 'multi' : ''), 'utf8');
+    res.writeHead(200, {
+      'Content-Type': 'text/csv; charset=utf-8',
+      'Content-Disposition': 'attachment; filename="romkit-games-template.csv"',
+      'Content-Length': body.length,
+      'Cache-Control': 'no-store',
+    });
+    return res.end(body);
+  }
+
+  // ---------- 新建清单：导入 CSV 文件清单
+  // body: { name?, system?, csv } 单份；或 { csvs: [{ name, text }] } 多份
+  // （含「相对路径」列的清单 = 一个游戏多文件，适合已安装游戏的工具导出清单）
+  if (p === '/libraries/from-csv' && method === 'POST') {
+    const body = await readJson(req);
+    const inputs = Array.isArray(body.csvs) && body.csvs.length
+      ? body.csvs.map((c) => ({ label: String((c && c.name) || '').trim(), text: String((c && c.text) || '') }))
+      : [{ label: '', text: String(body.csv || '') }];
+    const games = [];
+    const allErrors = [];
+    const allWarnings = [];
+    for (const { label, text } of inputs) {
+      if (!text.trim()) continue;
+      const parsed = csvdat.csvToGames(text);
+      const tag = label ? `（${label}）` : '';
+      for (const e of parsed.errors) allErrors.push(e + tag);
+      for (const w of parsed.warnings) allWarnings.push(w + tag);
+      for (const g of parsed.games) {
+        if (!g.files || !g.files.length) continue;
+        // 游戏名兜底：所属文件夹名（前端把 CSV 文件名传进来）→ CSV 文件名 → 「未命名」
+        games.push({
+          title: g.title || label.replace(/\.[^.]+$/, '') || '未命名游戏',
+          comment: (g.info && g.info.comment) || '',
+          publisher: (g.info && g.info.publisher) || '',
+          location: (g.info && g.info.location) || '',
+          language: (g.info && g.info.language) || '',
+          saveType: (g.info && g.info.saveType) || '',
+          files: g.files,
+        });
+      }
+    }
+    if (!games.length) {
+      return json(res, 400, {
+        error: allErrors[0] || '没有解析到任何条目',
+        errors: allErrors, warnings: allWarnings,
+      });
+    }
+    const name = String(body.name || '').trim() || 'CSV 清单';
+    const xml = csvdat.buildDatXml({ datName: name, system: body.system, entries: games });
+    const r = await registerDat({
+      buffer: Buffer.from(xml, 'utf8'),
+      fileName: sanitize(name) + '.xml',
+      sourceLabel: 'CSV 导入',
+      origin: { type: 'csv' },
+    });
+    if (r.library && !r.skipped && !r.replaced) {
+      // 文件清单通常没有 CRC：这类库默认按「名称+大小」验证
+      r.library.settings.matchMode = 'name-size';
+      await store.save();
+    }
+    return json(res, 200, {
+      library: summarize(r.library),
+      skipped: !!r.skipped, replaced: !!r.replaced,
+      stats: { total: games.length },
+      errors: allErrors, warnings: allWarnings,
+    });
+  }
+
+  // ---------- 新建清单：直接读服务器上的文件夹
+  // body: { name?, system?, folder, recursive?, mode? }
+  //   mode='files'（默认）：一个文件 = 一个游戏
+  //   mode='games'：每个子文件夹 = 一个游戏（多文件条目，适合已安装游戏）
+  if (p === '/libraries/from-folder' && method === 'POST') {
+    const body = await readJson(req);
+    const folder = String(body.folder || '').trim();
+    if (!folder) return json(res, 400, { error: '缺少文件夹路径' });
+    const st = await fsp.stat(folder).catch(() => null);
+    if (!st || !st.isDirectory()) return json(res, 400, { error: '文件夹不存在：' + folder });
+    const multi = body.mode === 'games';
+    let games;
+    let got;
+    if (multi) {
+      got = await csvdat.gamesFromFolder(folder);
+      games = got.games.map((g) => ({
+        title: g.title,
+        comment: '', publisher: '', location: '', language: '', saveType: '',
+        files: g.files,
+      }));
+    } else {
+      got = await csvdat.entriesFromFolder(folder, { recursive: !!body.recursive });
+      games = got.entries.map((e) => ({
+        title: e.title, comment: '', publisher: '', location: '', language: '', saveType: '',
+        files: [{ filename: e.sourceRom, name: '', size: e.romSize, crc: e.crc }],
+      }));
+    }
+    if (!games.length) {
+      return json(res, 400, {
+        error: got.errors[0] || '文件夹里没有可识别的文件',
+        errors: got.errors, warnings: got.warnings,
+      });
+    }
+    const name = String(body.name || '').trim() || path.basename(folder);
+    const xml = csvdat.buildDatXml({ datName: name, system: body.system, entries: games });
+    const r = await registerDat({
+      buffer: Buffer.from(xml, 'utf8'),
+      fileName: sanitize(name) + '.xml',
+      sourceLabel: folder,
+      origin: { type: 'folder' },
+    });
+    if (r.library && !r.skipped && !r.replaced) {
+      r.library.settings.matchMode = 'name-size';
+      // ROM 目录顺手指过去，用户不用再填一遍
+      if (!r.library.settings.romDir) r.library.settings.romDir = folder;
+      await store.save();
+    }
+    return json(res, 200, {
+      library: summarize(r.library),
+      skipped: !!r.skipped, replaced: !!r.replaced,
+      stats: { total: games.length },
+      errors: got.errors, warnings: got.warnings,
+    });
+  }
+
   // ---------- 封面批量下载 / 命名预览（路径含两段，需先于通用库路由匹配）
   const mFix = p.match(/^\/libraries\/([\w-]+)\/(covers\/fetch|covers\/probe|preview-name)$/);
   if (mFix && method === 'POST') {
@@ -793,7 +1063,9 @@ async function handleApi(req, res, url) {
     return json(res, 200, { task: taskSnapshot(task) });
   }
 
-  const m = p.match(/^\/libraries\/([\w-]+)(\/[a-z-]+)?$/);
+  // 注意：这里要允许两段以上的路径（如 /libraries/:id/overrides/:oid），
+  // 只匹配一段会让子资源的 GET/PATCH/DELETE 全部落到 404
+  const m = p.match(/^\/libraries\/([\w-]+)(\/.*)?$/);
   if (m) {
     const lib = store.getLibrary(m[1]);
     if (!lib) return json(res, 404, { error: '库不存在' });
@@ -916,6 +1188,66 @@ async function handleApi(req, res, url) {
       });
     }
 
+    // ---------- 站点数据：状态 / 手动同步（发布链接 + 发布说明）
+    if (action === '/site' && method === 'GET') {
+      const rt = await hydrateLibrary(lib);
+      if (!rt.dat) return json(res, 400, { error: rt.error || 'DAT 未加载' });
+      const fromEmugif = emugif.isEmugif(rt.rawDat || rt.dat);
+      const consoleType = emugif.consoleTypeOf(rt.rawDat || rt.dat);
+      const cachedCt = consoleType ? await emugif.readCache(consoleType) : null;
+      const site = await siteIndexOf(rt.rawDat || rt.dat);
+      let matched = 0;
+      let withLink = 0;
+      let withComment = 0;
+      if (site && site.index) {
+        const games = (rt.scan && rt.scan.games) || rt.dat.games;
+        const r = emugif.collect(games, site && site.index, site && site.consoleType);
+        matched = r.matched;
+        withLink = r.withLink;
+        withComment = r.withComment;
+      }
+      return json(res, 200, {
+        supported: fromEmugif && !!consoleType,
+        consoleType: consoleType || '',
+        synced: !!cachedCt,
+        fetchedAt: cachedCt ? cachedCt.fetchedAt : null,
+        total: cachedCt ? cachedCt.total : 0,
+        games: rt.dat.games.length,
+        matched,
+        withLink,
+        withComment,
+        error: site && site.error ? site.error : null,
+      });
+    }
+
+    if (action === '/site/sync' && method === 'POST') {
+      const rt = await hydrateLibrary(lib);
+      if (!rt.dat) return json(res, 400, { error: rt.error || 'DAT 未加载' });
+      const src = rt.rawDat || rt.dat;
+      if (!emugif.isEmugif(src)) return json(res, 400, { error: '这个 DAT 不是来自 dat.emugif.com，没有站点数据可取' });
+      const ct = emugif.consoleTypeOf(src);
+      if (!ct) return json(res, 400, { error: '认不出这个 DAT 对应的机种' });
+
+      const task = createTask('site', lib.id, async ({ setProgress }) => {
+        setProgress({ phase: 'site', message: `正在下载「${ct}」的站点数据…`, current: 0, total: 1 });
+        const payload = await emugif.fetchConsole(ct, true);
+        siteCache.delete(ct);
+        const games = (rt.scan && rt.scan.games) || rt.dat.games;
+        const site = await siteIndexOf(src);
+        const r = emugif.collect(games, site && site.index, site && site.consoleType);
+        setProgress({ phase: 'done', message: '完成', current: 1, total: 1 });
+        return {
+          consoleType: ct,
+          total: payload.total,
+          games: games.length,
+          matched: r.matched,
+          withLink: r.withLink,
+          withComment: r.withComment,
+        };
+      });
+      return json(res, 200, { task: taskSnapshot(task) });
+    }
+
     // ---------- 游戏列表
     if (action === '/games' && method === 'GET') {
       const rt = await hydrateLibrary(lib);
@@ -924,10 +1256,146 @@ async function handleApi(req, res, url) {
       const games = scan
         ? scan.games
         : rt.dat.games.map((g) => ({ ...g, status: 'unknown', matches: [] }));
+      // 站点数据只读缓存：列表接口不该顺手联网，要拉由前端显式点同步
+      const site = await siteIndexOf(rt.rawDat || rt.dat);
+      const { sites } = emugif.collect(games, site && site.index, site && site.consoleType);
       return json(res, 200, {
         games,
+        sites,
         stats: scan ? { ...scan.stats, scannedAt: scan.scannedAt, elapsedMs: scan.elapsedMs } : { games: games.length, owned: 0, scannedAt: null },
         romDir: scan ? scan.romDir : lib.settings.romDir,
+        // 文件夹型清单（每个游戏是目录、由多文件构成）：前端据此把「格式」栏显示成
+        // 「文件夹」、并把 CRC 列 / 详情 CRC 区按文件数聚合，而不是把上百个 CRC 铺开
+        folderType: games.length > 0 && games.every((g) => g.multiFile),
+      });
+    }
+
+    // ---------- 导出当前库的 CSV（含已应用的覆盖层，即界面上看到的实际数据）
+    // 方便批量改元数据后回导。多文件（文件夹）游戏只导一行元数据，不含文件清单。
+    if (action === '/dat-export.csv' && method === 'GET') {
+      const rt = await hydrateLibrary(lib);
+      if (!rt.dat) return json(res, 400, { error: rt.error || 'DAT 未加载' });
+      const body = Buffer.from('\ufeff' + csvdat.gamesToCsv(rt.dat.games), 'utf8');
+      res.writeHead(200, {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="${encodeURIComponent(sanitize(lib.name) + '.csv')}"`,
+      });
+      return res.end(body);
+    }
+
+    // ---------- 从 CSV 回导：按 编号/名称/文件名 匹配现有游戏，批量更新元数据；
+    // 未匹配且带文件名+大小的行当作新增单文件条目。改动走覆盖层，不破坏原 DAT。
+    if (action === '/import-csv' && method === 'POST') {
+      const body = await readJson(req);
+      const csv = String(body.csv || '');
+      if (!csv.trim()) return json(res, 400, { error: 'CSV 内容为空' });
+      const rt = await hydrateLibrary(lib);
+      if (!rt.dat) return json(res, 400, { error: rt.error || 'DAT 未加载' });
+      const games = (rt.rawDat || rt.dat).games || [];
+      const byIndex = new Map(games.map((g) => [g.index, g]));
+      const byTitle = new Map(games.map((g) => [normalizeKey(g.title || ''), g]).filter(([, g]) => g && g.title));
+      const byRom = new Map(games.map((g) => [normalizeKey(g.sourceRom || ''), g]).filter(([, g]) => g && g.sourceRom));
+
+      const rows = csvdat.parseCsv(csv);
+      if (rows.length < 2) return json(res, 400, { error: 'CSV 没有数据行（至少需要表头 + 一行）' });
+      const header = rows[0].map((h) => String(h).trim());
+      const col = (name) => header.findIndex((h) => h === name);
+      const ci = {
+        index: col('编号'), title: col('名称'), comment: col('英文名'),
+        filename: col('文件名'), size: col('大小(字节)'), crc: col('CRC32'),
+        publisher: col('发行厂商'), location: col('地区'), language: col('语言'),
+      };
+      const get = (r, i) => (i >= 0 && i < r.length ? String(r[i] || '').trim() : '');
+
+      const book = await overrides.load(lib.id);
+      book.entries = book.entries || [];
+      const updated = [];
+      const added = [];
+      const skipped = [];
+      const warnings = [];
+
+      for (let n = 1; n < rows.length; n++) {
+        const r = rows[n];
+        const title = get(r, ci.title);
+        if (!title && ci.index < 0) { skipped.push(`第 ${n + 1} 行：没有名称也无法匹配`); continue; }
+
+        // 匹配现有游戏：优先 编号（精准），其次 名称，再次 文件名
+        let matched = null;
+        const idxRaw = get(r, ci.index);
+        if (idxRaw !== '') {
+          const idx = Number(idxRaw);
+          if (Number.isFinite(idx) && byIndex.has(idx)) matched = byIndex.get(idx);
+        }
+        if (!matched && title) matched = byTitle.get(normalizeKey(title));
+        if (!matched && ci.filename >= 0) {
+          const fn = get(r, ci.filename);
+          if (fn) matched = byRom.get(normalizeKey(fn));
+        }
+
+        const fields = overrides.normalizeFields({
+          comment: get(r, ci.comment),
+          publisher: get(r, ci.publisher),
+          location: get(r, ci.location),
+          language: get(r, ci.language),
+        });
+
+        if (matched) {
+          // 更新覆盖层里引用该 index 的条目（没有就新建）
+          let entry = book.entries.find((e) => (e.sourceIndexes || []).includes(matched.index));
+          if (!entry) {
+            entry = {
+              id: overrides.newId(),
+              name: '', fields: {}, children: [], files: [],
+              matchMode: 'dat', sourceIndexes: [matched.index],
+              snapshot: [overrides.snapshotOf(matched)],
+              createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+            };
+            book.entries.push(entry);
+          }
+          entry.fields = { ...(entry.fields || {}), ...fields };
+          if (title) entry.name = title; // 改名（显示名）
+          entry.updatedAt = new Date().toISOString();
+          updated.push(matched.index);
+          continue;
+        }
+
+        // 未匹配：带文件名 + 大小 → 新增单文件条目；否则跳过
+        const fn = get(r, ci.filename);
+        const sizeRaw = get(r, ci.size).replace(/[,\s_]/g, '');
+        const size = Number(sizeRaw) || 0;
+        const crc = get(r, ci.crc).toUpperCase();
+        if (fn && (size || crc)) {
+          const ext = (path.extname(fn).replace(/^\./, '') || '').toLowerCase();
+          const entry = {
+            id: overrides.newId(),
+            name: title || fn,
+            files: [{ ext, size, crc, label: '' }],
+            children: [],
+            fields,
+            matchMode: 'name-size',
+            sourceIndexes: [],
+            snapshot: [],
+            baseIndex: nextStandaloneIndex(book),
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          };
+          book.entries.push(entry);
+          added.push(entry.name);
+        } else {
+          skipped.push(`第 ${n + 1} 行「${title || fn || '（无名）'}」：未匹配到现有游戏，且不是有效的「文件名+大小」新条目`);
+        }
+      }
+
+      await overrides.save(lib.id, book);
+      // 刷新内存里的覆盖结果，让下次读取立刻生效
+      const rawNow = rt.rawDat || rt.dat;
+      const ap = await applyOverrides(lib.id, rawNow);
+      runtime.set(lib.id, { ...rt, dat: ap.dat, rawDat: rawNow, conflicts: ap.conflicts, scan: null, pending: null });
+      await store.save();
+
+      return json(res, 200, {
+        updated: updated.length, added: added.length, skipped: skipped.length,
+        updatedIndexes: updated, addedNames: added, skippedRows: skipped, warnings,
       });
     }
 
@@ -1022,6 +1490,254 @@ async function handleApi(req, res, url) {
         mode: lib.settings.mode,
         operation: lib.settings.operation,
       });
+    }
+
+    // ---------- 条目编辑（覆盖层）
+    if (action === '/overrides' && method === 'GET') {
+      const rt = await hydrateLibrary(lib);
+      const book = await overrides.load(lib.id);
+      const raw = rt.rawDat || rt.dat;
+      const rawByIndex = new Map((raw.games || []).map((g) => [g.index, g]));
+      // bases：被引用条目在 DAT 里的原始字段（前端用来判断「改没改过」）
+      const bases = {};
+      const entries = (book.entries || []).map((e) => ({
+        ...e,
+        // members：已合并进来的来源条目（列表里已经看不到它们了）
+        members: (e.sourceIndexes || []).map((i) => {
+          const g = rawByIndex.get(i);
+          if (g) {
+            bases[i] = {
+              title: g.title || '', comment: g.comment || '', publisher: g.publisher || '',
+              sourceRom: g.sourceRom || '', location: g.location || '', language: g.language || '',
+              saveType: g.saveType || '', romSize: g.romSize || 0,
+            };
+          }
+          return {
+            index: i,
+            title: g ? g.title : '',
+            // 子条目在 DAT 里的原始信息：编辑界面用它判断「改没改过」
+            comment: g ? g.comment : '',
+            publisher: g ? g.publisher : '',
+            sourceRom: g ? g.sourceRom : '',
+            location: g ? g.location : '',
+            language: g ? g.language : '',
+            saveType: g ? g.saveType : '',
+            romSize: g ? g.romSize : 0,
+            imageNumber: g ? g.imageNumber : i,
+            crcCount: g ? (g.crcs || []).length : 0,
+            // 各自声明的文件：勾选/取消勾选来源时，前端按这个增删文件行
+            files: g ? (g.crcs || []).map((c) => ({
+              crc: (c.crc || '').toUpperCase(),
+              ext: c.extension || '',
+              size: g.romSize || 0,
+              label: c.label || '',
+            })) : [],
+          };
+        }),
+      }));
+      return json(res, 200, {
+        entries,
+        conflicts: (rt.conflicts || []),
+        bases,
+      });
+    }
+
+    // 新建：indexes 一条=重命名/改匹配方式，多条=合并
+    if (action === '/overrides' && method === 'POST') {
+      const body = await readJson(req);
+      const indexes = (body.indexes || []).map((n) => Number(n)).filter((n) => Number.isFinite(n));
+
+      // —— 自建条目（手动新增，不引用 DAT 原条目）：
+      //    文件表完全由请求提供，默认按「名称+大小」验证
+      if (body.standalone || !indexes.length) {
+        const files = (Array.isArray(body.files) ? body.files : []).map((f) => ({
+          ext: String((f && f.ext) || '').trim().toLowerCase(),
+          size: Number(f && f.size) || 0,
+          crc: String((f && f.crc) || '').trim().toUpperCase(),
+          label: String((f && f.label) || '').trim(),
+        })).filter((f) => f.ext || f.crc);
+        if (!files.length) return json(res, 400, { error: '至少要有一个文件（后缀或 CRC）' });
+        if (!String(body.name || '').trim()) return json(res, 400, { error: '名称不能为空' });
+        const book = await overrides.load(lib.id);
+        const entry = {
+          id: overrides.newId(),
+          name: String(body.name).trim(),
+          files,
+          children: [],
+          fields: overrides.normalizeFields(body.fields),
+          matchMode: ['crc', 'name', 'name-size'].includes(body.matchMode) ? body.matchMode : 'name-size',
+          sourceIndexes: [],
+          snapshot: [],
+          baseIndex: nextStandaloneIndex(book),
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        book.entries = book.entries || [];
+        book.entries.push(entry);
+        await overrides.save(lib.id, book);
+
+        const rt0 = await hydrateLibrary(lib);
+        const raw0 = rt0.rawDat || rt0.dat;
+        const ap0 = await applyOverrides(lib.id, raw0);
+        runtime.set(lib.id, { ...rt0, dat: ap0.dat, rawDat: raw0, conflicts: ap0.conflicts, scan: null, pending: null });
+        await store.save();
+        return json(res, 200, { entry, conflicts: ap0.conflicts, standalone: true });
+      }
+      if (!indexes.length) return json(res, 400, { error: '请先选择要编辑的条目' });
+      const rt = await hydrateLibrary(lib);
+      const raw = rt.rawDat || rt.dat;
+      const byIndex = new Map((raw.games || []).map((g) => [g.index, g]));
+      const picked = indexes.map((i) => byIndex.get(i)).filter(Boolean);
+      if (!picked.length) return json(res, 400, { error: '选中的条目在当前 DAT 里不存在' });
+
+      // 合并时默认用 DAT 里靠前的那条的标题（indexes 已按用户勾选顺序，
+      // 这里再按 DAT 顺序排一次，保证"靠前"是真靠前）
+      picked.sort((a, b) => a.index - b.index);
+      // 一个条目可以包含多个文件（合并就是把这些文件并到一起），
+      // 所以只能按「CRC + 后缀」去重 —— 同后缀的不同文件必须都保留
+      // DAT 声明的文件不能丢：勾选（吃掉）的来源条目，它的每个文件都必须保留在
+      // 覆盖条目里。否则对应 ROM 的 CRC 在清单里查不到，会被当成「未识别」
+      // 被整理走。所以文件表 = 前端编辑过的（保留标签/大小）∪ DAT 声明的文件。
+      const declared = [];
+      const seenDecl = new Set();
+      const pushDecl = (ext, size, crc, label) => {
+        const key = (crc || '').toUpperCase() + '|' + (ext || '');
+        if (seenDecl.has(key)) return;
+        seenDecl.add(key);
+        declared.push({
+          ext: ext || '',
+          size: Number(size) || 0,
+          crc: (crc || '').toUpperCase(),
+          label: label || '',
+        });
+      };
+      for (const g of picked) {
+        if ((g.crcs || []).length) {
+          for (const c of g.crcs || []) pushDecl(c.extension, g.romSize || 0, c.crc, c.label);
+        } else {
+          pushDecl(g.ext || '', g.romSize || 0, '', '');
+        }
+      }
+      // 前端编辑过的文件表（标签/大小），漏掉的 DAT 文件在后面补回来
+      const bodyFiles = Array.isArray(body.files) ? body.files : null;
+
+      const book = await overrides.load(lib.id);
+      const clientFiles = bodyFiles
+        ? bodyFiles.map((f) => ({
+            ext: String((f && f.ext) || '').trim(),
+            size: Number(f && f.size) || 0,
+            crc: String((f && f.crc) || '').trim().toUpperCase(),
+            label: String((f && f.label) || '').trim(),
+          })).filter((f) => f.crc || f.ext)
+        : null;
+      const haveCrc = new Set((clientFiles || []).map((f) => f.crc + '|' + f.ext));
+      const declMap = new Map(declared.map((d) => [d.crc + '|' + d.ext, d]));
+      const files = (clientFiles || [])
+        // 大小没填/丢了（旧数据常见）→ 用 DAT 声明的大小补上
+        .map((f) => {
+          if (f.size) return f;
+          const d = declMap.get(f.crc + '|' + f.ext);
+          return d && d.size ? { ...f, size: d.size } : f;
+        })
+        .concat(declared.filter((d) => !haveCrc.has(d.crc + '|' + d.ext)));
+      const entry = {
+        id: overrides.newId(),
+        name: String(body.name || picked[0].title || '').trim() || picked[0].title,
+        files,
+        // 子条目（被合并进来的原条目）各自的信息修改
+        children: normalizeChildren(body.children),
+        fields: overrides.normalizeFields(body.fields),
+        matchMode: ['crc', 'name', 'name-size'].includes(body.matchMode) ? body.matchMode : 'dat',
+        sourceIndexes: picked.map((g) => g.index),
+        snapshot: picked.map(overrides.snapshotOf),
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      // 同一个 DAT 条目只能被一个覆盖条目吃掉，先清掉旧的
+      book.entries = (book.entries || []).filter(
+        (e) => !(e.sourceIndexes || []).some((i) => entry.sourceIndexes.includes(i)),
+      );
+      book.entries.push(entry);
+      await overrides.save(lib.id, book);
+
+      const ap = await applyOverrides(lib.id, raw);
+      const cur = runtime.get(lib.id) || {};
+      runtime.set(lib.id, { ...cur, dat: ap.dat, rawDat: raw, conflicts: ap.conflicts, scan: null, pending: null });
+      await store.save();
+      return json(res, 200, { entry, conflicts: ap.conflicts });
+    }
+
+    const ovMatch = action.match(/^\/overrides\/([\w-]+)$/);
+    if (ovMatch && (method === 'PATCH' || method === 'PUT')) {
+      const body = await readJson(req);
+      const book = await overrides.load(lib.id);
+      const entry = (book.entries || []).find((e) => e.id === ovMatch[1]);
+      if (!entry) return json(res, 404, { error: '该修改不存在（可能已被删除）' });
+      if (typeof body.name === 'string' && body.name.trim()) entry.name = body.name.trim();
+      if (body.matchMode !== undefined) {
+        entry.matchMode = ['crc', 'name', 'name-size'].includes(body.matchMode) ? body.matchMode : 'dat';
+      }
+      if (body.fields !== undefined) entry.fields = overrides.normalizeFields(body.fields);
+      if (body.children !== undefined) entry.children = normalizeChildren(body.children);
+      if (Array.isArray(body.files)) {
+        // 与 POST 相同的并集规则：前端编辑的保留，DAT 声明的文件一个都不能少
+        const rt0 = await hydrateLibrary(lib);
+        const raw0 = rt0.rawDat || rt0.dat;
+        const byIdx0 = new Map((raw0.games || []).map((g) => [g.index, g]));
+        const decl = [];
+        const seenD = new Set();
+        for (const i of entry.sourceIndexes || []) {
+          const g = byIdx0.get(i);
+          if (!g) continue;
+          if ((g.crcs || []).length) {
+            for (const c of g.crcs || []) {
+              const key = (c.crc || '').toUpperCase() + '|' + (c.extension || '');
+              if (seenD.has(key)) continue;
+              seenD.add(key);
+              decl.push({ ext: c.extension || '', size: g.romSize || 0, crc: (c.crc || '').toUpperCase(), label: c.label || '' });
+            }
+          } else {
+            const key = '|' + (g.ext || '');
+            if (!seenD.has(key)) { seenD.add(key); decl.push({ ext: g.ext || '', size: g.romSize || 0, crc: '', label: '' }); }
+          }
+        }
+        const cf = body.files.map((f) => ({
+          ext: String((f && f.ext) || '').trim(),
+          size: Number(f && f.size) || 0,
+          crc: String((f && f.crc) || '').trim().toUpperCase(),
+          label: String((f && f.label) || '').trim(),
+        })).filter((f) => f.crc || f.ext);
+        const have0 = new Set(cf.map((f) => f.crc + '|' + f.ext));
+        const declMap0 = new Map(decl.map((d) => [d.crc + '|' + d.ext, d]));
+        entry.files = cf
+          .map((f) => {
+            if (f.size) return f;
+            const d = declMap0.get(f.crc + '|' + f.ext);
+            return d && d.size ? { ...f, size: d.size } : f;
+          })
+          .concat(decl.filter((d) => !have0.has(d.crc + '|' + d.ext)));
+      }
+      entry.updatedAt = new Date().toISOString();
+      await overrides.save(lib.id, book);
+
+      const rt = await hydrateLibrary(lib);
+      const raw = rt.rawDat || rt.dat;
+      const ap = await applyOverrides(lib.id, raw);
+      runtime.set(lib.id, { ...rt, dat: ap.dat, rawDat: raw, conflicts: ap.conflicts, scan: null, pending: null });
+      return json(res, 200, { entry, conflicts: ap.conflicts });
+    }
+
+    if (ovMatch && method === 'DELETE') {
+      const book = await overrides.load(lib.id);
+      const before = (book.entries || []).length;
+      book.entries = (book.entries || []).filter((e) => e.id !== ovMatch[1]);
+      if (book.entries.length === before) return json(res, 404, { error: '该修改不存在' });
+      await overrides.save(lib.id, book);
+      const rt = await hydrateLibrary(lib);
+      const raw = rt.rawDat || rt.dat;
+      const ap = await applyOverrides(lib.id, raw);
+      runtime.set(lib.id, { ...rt, dat: ap.dat, rawDat: raw, conflicts: ap.conflicts, scan: null, pending: null });
+      return json(res, 200, { ok: true, conflicts: ap.conflicts });
     }
 
     // ---------- 执行整理
@@ -1126,7 +1842,7 @@ async function handleApi(req, res, url) {
         // 完全一样（版本没变、条目与 CRC 全同），就不能把扫描进度清掉，
         // 否则用户只是点了下「更新 DAT」就得整库重扫一遍。
         const rt0 = await hydrateLibrary(lib).catch(() => null);
-        const oldDat = rt0 && rt0.dat;
+        const oldDat = rt0 && (rt0.rawDat || rt0.dat);
         const oldScan = rt0 && rt0.scan;
         const oldSig = oldDat ? datSignature(oldDat) : '';
 
@@ -1142,8 +1858,11 @@ async function handleApi(req, res, url) {
         lib.error = null;
         // 内容没变不算更新，保留原来的时间
         if (!unchanged) lib.updatedAt = new Date().toISOString();
+        const apU = await applyOverrides(lib.id, resu.dat);
         runtime.set(lib.id, {
-          dat: resu.dat,
+          dat: apU.dat,
+          rawDat: resu.dat,
+          conflicts: apU.conflicts,
           // 内容没变就沿用原来的扫描结果，界面上的拥有数/待整理都不动
           scan: unchanged ? (oldScan || null) : null,
           error: null,

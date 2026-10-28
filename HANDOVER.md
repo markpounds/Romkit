@@ -47,6 +47,7 @@ node server.js
 | `covers.js` | 截图/封面的下载与索引 |
 | `dat.js` | DAT 解析（兼容 OfflineList 格式）、在线更新源 |
 | `naming.js` | 命名模板（`%u %n %g` 等占位符） |
+| `overrides.js` | **DAT 条目编辑的覆盖层**（外部 JSON，不写回 DAT；合并/改名/多文件/条目级匹配方式/冲突检测） |
 | `zip.js` `crc32.js` | zip 读写、CRC32 计算 |
 
 ## 4. 跑测试
@@ -60,7 +61,11 @@ node tests/e2e.js               # 23 项 端到端（扫描→整理全流程）
 node tests/platform-smoke.js    # 14 项 平台简称映射
 node tests/order-smoke.js       # 8 项  分类/清单排序模型
 node tests/name-match-smoke.js  # 11 项 文件名匹配
-# 还有 category / pending / paths / md-ext / perm / fs-picker / icon
+node tests/name-size-smoke.js   # 18 项 「文件名+大小」精确匹配
+node tests/overrides-smoke.js   # 18 项 DAT 条目编辑覆盖层
+node tests/update-pending-smoke.js  # 16 项 更新DAT不重置扫描 / 待整理计数
+node tests/image-number-smoke.js    # 12 项 imageNumber 透传
+# 还有 category / pending / paths / md-ext / perm / fs-picker / icon / cache-clear
 ```
 
 每个脚本结尾都会打印 `N 通过 / M 失败`，失败时以非 0 退出码结束，可直接接 CI。
@@ -86,7 +91,43 @@ node tools/build-windows.js   # 生成 dist/ROMKit-Windows-便携版.zip + ROMKi
 | 扫描/匹配规则 | `lib/scanner.js` |
 | 整理/重命名规则 | `lib/organizer.js` + `lib/naming.js` |
 | 分类与排序模型 | `lib/store.js`（注意 `ord` 字段与 `flattenGroups` 的前序展开规则） |
+| 条目编辑 / 合并 DAT 条目 | `lib/overrides.js` + `server.js` 的 `/libraries/:id/overrides` 路由 + `web/app.js` 的 `OV` 相关函数 |
 | fnOS 专属行为（权限、启动） | `fnos/cmd/`、`fnos/wizard/` |
+
+### DAT 条目编辑（overrides）的设计要点
+
+- **DAT 永远不写回**。用户的编辑存成外部 JSON：`data/overrides/<libId>.json`，结构 `{ entries: [{ id, name, files:[{ext,size,crc,label}], fields, matchMode, sourceIndexes, snapshot }] }`。
+- 运行时 `hydrateLibrary` 会：**先加载原始 DAT（`rt.rawDat`）→ 再套用覆盖层（`rt.dat`）→ 冲突写进 `rt.conflicts`**。
+  - `rt.rawDat` 必须保留原始版本，否则「更新 DAT 时是否变化」的签名判断会永远认为没变。
+- 合并条目 = **总条目 + 若干子条目**（孩子是被吃掉的原 DAT 条目）：
+  - 总条目只存 `name`（中文名）、`fields.comment`（英文名）和编号（= 最小的 sourceIndex），
+    其余字段一律空着，由子条目在详情页轮流提供；
+  - 子条目 `children[]` 保留各自编号、标题、英文名、国家/厂商/来源/容量/存档/语言、CRC，
+    可单独改（存 `entry.children[i].fields`，键与 EDITABLE_FIELDS 一致，含 title）；
+  - 详情页用**子条目的原编号**当页签（0023 / 0024），切换时下面所有信息、封面/截图
+    （按子条目的 index 取，合并前各自下载的图还在）一起切；
+  - 整理时每个子条目各自输出一份，按自己的编号+标题命名；只有同一子条目内的多份同 CRC
+    文件才算真副本（`organizer.buildPlan` 里的 `planChildItem`）。
+- **多文件条目按「全部命中才算拥有」**（`multiFile` 标记 = 合成条目且文件数 > 1）。
+  原生 DAT 里同一条目挂多个 `romCRC` 往往是同一 ROM 的不同格式（`.md`/`.gen`），
+  那些必须保持「任一命中」，所以只有**合并出来的**条目才走 AND 语义，别搞反了。
+  AND 语义下缺哪个文件会输出 `fileCheck: { total, found, missing:[{crc, ext, size, label}] }`，
+  详情页「文件核对」列出来；没找齐就是 `missing`，不会去整理半成品。
+- 每个文件可带 `label`（标签名）和各自的 `size`。标签名是给用户在编辑界面起的（如「简」「繁」），
+  详情页 CRC 行默认只显示 ID，设了标签才带出来。`size` 让「名称+大小」模式逐文件比对。
+- **字段覆盖**：`entry.fields` 可覆盖 `comment / publisher / sourceRom / location / language /
+  saveType / romSize`，标题走 `entry.name`。只存改过的键，留空 = 跟随 DAT。
+  这些值会流到详情页那一列，也参与整理命名（`%n %p %i %o %g %s %a`）。
+- 冲突检测靠 `snapshotOf(g)`（index/title/romSize/crcs）比对：更新 DAT 后，若条目消失或内容变了，编辑弹窗顶部会出现红色提示条。
+- **前端重存合并条目的坑**：编辑弹窗保存 = 删旧建新，必须把 `entry.sourceIndexes`
+  完整回传。GET `/overrides` 会返回 `members`（已合并来源，含各自 files，回填勾选框）
+  和 `bases`（DAT 原始字段，用来判断「改没改过」），漏了任何一个重新保存就会丢数据。
+- **文件表是并集，不是客户端说了算**：POST/PATCH 的 files =
+  前端编辑的（保留标签/大小）∪ 勾选来源条目在 DAT 里声明的全部文件。
+  如果只信前端，删一行文件就会把那个 CRC 从清单里弄丢 —— 对应 ROM 会变成
+  「未识别」，整理时被建议移走。文件行的增删只通过勾选/取消来源条目完成，
+  CRC/扩展名在编辑界面是只读的。
+- **路由坑**：`/libraries/:id` 的后续路径正则必须允许**两段以上**（`/overrides/:oid`），写成 `(\/[a-z-]+)?` 会 404。当前是 `(\/.*)?`。
 
 ## 7. 已知的坑（改之前先看一眼）
 
@@ -96,6 +137,10 @@ node tools/build-windows.js   # 生成 dist/ROMKit-Windows-便携版.zip + ROMKi
 4. **`.md` 后缀**：世嘉 MD 的 ROM 是 `.md`，与 Markdown 冲突。忽略文档时只忽略明确的 `README.md` 之类，不能按扩展名一刀切。
 5. **前端图标缓存**：清单/分类图标 URL 必须带 `?v=${S.iconStamp}`（或对应戳），否则换了图浏览器会复用旧缓存，看起来像没换成功。
 6. **`start.bat` 不要手改**，它由 `tools/gen-startbat.js` 生成（要保证 CRLF + 纯 ASCII）。
+7. **编号用 `imageNumber`，不是数组下标**：列表显示、`%u` 命名都取 `game.imageNumber || game.index`。扫描结果里必须带上 `imageNumber`，否则扫完之后编号会跳号（DAT 里重复编号/未编号的条目会让 index ≠ imageNumber）。
+8. **匹配方式**：库级是 `crc | name | both | name-size`，条目级还有 `dat`（跟随库设置）。`name-size` 模式下详情会给出 `sizeCheck { expected, missing, actual }`，点「查看详情」能看到缺哪些文件、哪个文件名对但大小不符。
+9. **整理落盘的权限预检**：`rename` 需要**源目录和目标目录都可写**（复制模式也一样）。`lib/organizer.js` 的 `probeWritable()` 用「真的建一个临时文件」来判断，因为 SMB/ACL 下 `fs.access` 返回的权限不可信。输出目录不可写 → 整体中止；其它目录不可写 → 只跳过受影响的条目。
+10. **更新 DAT 不要无脑重置扫描**：用 `datSignature(dat)`（版本+条目数+每条 `index:crc` 的 sha1）比对，没变就保留原扫描结果与待整理状态。
 
 ## 8. Git 协作约定
 

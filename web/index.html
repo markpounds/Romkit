@@ -44,6 +44,7 @@
 
     <div class="sidebar-actions">
       <button class="btn btn-block" id="btnAddDat">＋ 添加 DAT</button>
+      <button class="btn btn-block" id="btnNewLib">＋ 新建清单（CSV / 文件夹）</button>
     </div>
 
     <div class="inbox-box">
@@ -75,6 +76,9 @@
           <button class="btn" id="btnScan" title="扫描 ROM 目录并与 DAT 比对">扫描</button>
           <button class="btn primary" id="btnOrganize" title="按当前设置整理文件">整理</button>
           <button class="btn ghost" id="btnUpdate" title="检查并下载 DAT 更新">更新 DAT</button>
+          <button class="btn" id="btnAddEntry" title="手动新增一个游戏条目（默认按名称+大小验证）">＋ 新增条目</button>
+          <button class="btn ghost" id="btnExportCsv" title="把当前清单导出成 CSV，方便批量改元数据后再导回">导出 CSV</button>
+          <button class="btn ghost" id="btnImportCsv" title="从 CSV 批量导入：按编号/名称匹配现有游戏更新元数据，未匹配且带文件名的行新增">导入 CSV</button>
           <button class="btn ghost" id="btnClearCache" title="清除当前清单的 CRC 与扫描缓存，下次扫描会重新计算（匹配结果不对时用它）">清缓存</button>
           <button class="btn icon" id="btnLibSettings" title="清单设置">⚙</button>
           <button class="btn icon" id="btnTheme" title="切换深色"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg></button>
@@ -216,6 +220,105 @@
     </div>
   </div>
 
+  <!-- 条目编辑（DAT 覆盖层） -->
+  <div class="modal" id="ovModal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h3 id="ovTitle">编辑条目</h3>
+        <button class="btn icon" id="ovClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="ov-conflict" id="ovConflict" hidden></div>
+
+        <div class="field">
+          <label>总标题（中文名）</label>
+          <input class="input" id="ovName" placeholder="显示与整理时用的名称">
+          <div class="desc">合并后相当于新增一条，编号沿用最小的那个。整理命名里的 %n、列表里显示的标题都用它。</div>
+        </div>
+
+        <div class="ov-grid">
+          <div class="field">
+            <label>英文名</label>
+            <input class="input" id="ovParentComment" placeholder="总条目的英文名，留空则为空">
+          </div>
+          <div class="field">
+            <label>编号</label>
+            <input class="input mono" id="ovNum" readonly>
+          </div>
+        </div>
+
+        <div class="field" id="ovChildWrap" hidden>
+          <label>子条目信息（切换后可分别编辑）</label>
+          <div class="file-tabs" id="ovChildTabs"></div>
+          <div class="ov-grid" style="margin-top:8px">
+            <div class="field">
+              <label>标题</label>
+              <input class="input" id="ovChildTitle" placeholder="留空 = 跟随 DAT">
+            </div>
+            <div class="field">
+              <label>英文名</label>
+              <input class="input" id="ovComment" placeholder="留空 = 跟随 DAT">
+            </div>
+            <div class="field">
+              <label>发行国家</label>
+              <input class="input" id="ovLocation" placeholder="留空 = 跟随 DAT">
+            </div>
+            <div class="field">
+              <label>发行厂商</label>
+              <input class="input" id="ovPublisher" placeholder="留空 = 跟随 DAT">
+            </div>
+            <div class="field">
+              <label>发布来源</label>
+              <input class="input" id="ovSourceRom" placeholder="留空 = 跟随 DAT">
+            </div>
+            <div class="field">
+              <label>容量大小</label>
+              <input class="input" id="ovRomSize" placeholder="如 4MB / 512KB / 字节数，留空 = 跟随 DAT">
+            </div>
+            <div class="field">
+              <label>存档类型</label>
+              <input class="input" id="ovSaveType" placeholder="留空 = 跟随 DAT">
+            </div>
+            <div class="field">
+              <label>语言</label>
+              <input class="input" id="ovLanguage" placeholder="留空 = 跟随 DAT">
+            </div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>匹配方式</label>
+          <select class="input" id="ovMatchMode">
+            <option value="dat">跟随清单设置（默认）</option>
+            <option value="crc">仅 CRC</option>
+            <option value="name">仅文件名</option>
+            <option value="name-size">名称 + 大小完全一致</option>
+          </select>
+          <div class="desc">包含多个文件时，需要<b>每个文件都找到</b>才算已拥有；缺哪个会在详情页列出来。</div>
+        </div>
+
+        <div class="field">
+          <label>包含的文件 <span class="muted" id="ovFileCount"></span></label>
+          <div class="ov-files" id="ovFiles"></div>
+          <div class="desc">文件由勾选的来源条目决定：勾上就加进来，取消勾选就移走，DAT 声明的文件不会丢。可以给每个文件起个标签名（如「简」「繁」），详情页默认只显示 CRC，设了标签才带出来。</div>
+        </div>
+
+        <div class="field">
+          <label>包含的原编号</label>
+          <input class="input" id="ovSearch" placeholder="搜索标题，勾选后一起保存即合并成一条">
+          <div class="ov-pick" id="ovPick"></div>
+          <div class="desc">勾选的条目会被合并进来（列表里消失），文件并到这一条；取消勾选即从合并里移出，或从「恢复原始」整体还原。</div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn ghost" id="ovRevert">恢复原始</button>
+        <span class="spacer"></span>
+        <button class="btn ghost" id="ovCancel">取消</button>
+        <button class="btn primary" id="ovSave">保存</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 通用输入 -->
   <div class="modal" id="promptModal">
     <div class="modal-box narrow">
@@ -278,7 +381,117 @@
     </div>
   </div>
 
+  <!-- 新建清单：CSV 导入 / 文件夹直读 -->
+  <div class="modal" id="newLibModal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h3>新建清单</h3>
+        <button class="btn icon" id="nlClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="ov-grid">
+          <div class="field">
+            <label>清单名称</label>
+            <input class="input" id="nlName" placeholder="留空 = 用 CSV 文件名 / 文件夹名">
+          </div>
+          <div class="field">
+            <label>机种（可选）</label>
+            <input class="input" id="nlSystem" placeholder="如 PS2、SFC、PC 游戏">
+          </div>
+        </div>
+
+        <div class="field">
+          <label>方式一：导入 CSV 文件清单（可多选）</label>
+          <input type="file" class="input" id="nlCsvFile" accept=".csv,text/csv" multiple>
+          <div class="desc">没有清单？<a href="/api/csv-template">下载 CSV 模板</a>（<a href="/api/csv-template?mode=multi">多文件版</a>）。
+            每行一个游戏，必填「文件名」，建议带上「大小(字节)」——扫描时按<b>名称+大小</b>验证。
+            <b>含「相对路径」列的清单（如「文件清单_*.csv」）= 整份是一个游戏的一堆文件</b>，
+            一个游戏文件夹导一份、多选一起导即可。</div>
+        </div>
+
+        <div class="field">
+          <label>方式二：直接读取服务器上的文件夹</label>
+          <input class="input mono" id="nlFolder" placeholder="NAS / 本机上的 ROM 文件夹路径">
+          <label class="check" style="margin-top:6px"><input type="checkbox" id="nlRecursive"> 包含子文件夹</label>
+          <label class="check" style="margin-top:6px"><input type="checkbox" id="nlFolderGames"> 每个子文件夹算一个游戏（多文件，适合已安装游戏）</label>
+          <div class="desc">服务端直接扫文件夹建条目：文件名、大小自动记录，<b>完全不需要上传清单</b>。
+            勾上「每个子文件夹算一个游戏」时，条目的每个文件按<b>相对路径+大小</b>逐个验证。</div>
+        </div>
+
+        <div class="ov-conflict" id="nlResult" hidden></div>
+      </div>
+      <div class="modal-foot">
+        <span class="hint">两种方式选一种即可</span>
+        <span class="spacer"></span>
+        <button class="btn ghost" id="nlCancel">取消</button>
+        <button class="btn primary" id="nlCreate">创建</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 手动新增条目（写入覆盖层，不改原 DAT） -->
+  <div class="modal" id="addEntryModal">
+    <div class="modal-box">
+      <div class="modal-head">
+        <h3>新增条目</h3>
+        <button class="btn icon" id="aeClose">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field">
+          <label>名称 <span class="muted">必填</span></label>
+          <input class="input" id="aeName" placeholder="游戏显示名">
+        </div>
+        <div class="ov-grid">
+          <div class="field">
+            <label>文件名 <span class="muted">必填</span></label>
+            <input class="input mono" id="aeFile" placeholder="如 Super Mario World (J).smc">
+          </div>
+          <div class="field">
+            <label>大小</label>
+            <input class="input mono" id="aeSize" placeholder="字节数或 700M / 1.2G">
+          </div>
+        </div>
+        <div class="ov-grid">
+          <div class="field">
+            <label>CRC32（可选）</label>
+            <input class="input mono" id="aeCrc" placeholder="如 DEADBEEF，留空按名称+大小匹配">
+          </div>
+          <div class="field">
+            <label>英文名</label>
+            <input class="input" id="aeComment" placeholder="可选">
+          </div>
+        </div>
+        <div class="ov-grid">
+          <div class="field">
+            <label>厂商</label>
+            <input class="input" id="aePublisher" placeholder="可选">
+          </div>
+          <div class="field">
+            <label>地区</label>
+            <input class="input" id="aeLocation" placeholder="可选，如 日本 / 美国">
+          </div>
+        </div>
+        <div class="field">
+          <label>匹配方式</label>
+          <select class="input" id="aeMatch">
+            <option value="name-size" selected>名称 + 大小完全一致（推荐）</option>
+            <option value="name">仅文件名</option>
+            <option value="crc">仅 CRC</option>
+            <option value="dat">跟随清单设置</option>
+          </select>
+          <div class="desc">新增的条目保存在你的修改层，<b>不会改动原 DAT</b>；不想要了在条目编辑里「恢复原始」即可删除。</div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <span class="spacer"></span>
+        <button class="btn ghost" id="aeCancel">取消</button>
+        <button class="btn primary" id="aeSave">保存</button>
+      </div>
+    </div>
+  </div>
+
   <input type="file" id="filePicker" accept=".zip,.xml" multiple hidden>
+  <input type="file" id="csvImportFile" accept=".csv,text/csv" hidden>
   <input type="file" id="coverFilePicker" accept="image/*" hidden>
   <input type="file" id="iconFilePicker" accept="image/*" hidden>
   <input type="file" id="catIconPicker" accept="image/*" hidden>
